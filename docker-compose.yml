@@ -1,0 +1,107 @@
+volumes:
+  mongo_data:
+  mongo_data_latest: # mysql_data:
+  clickhouse-data:
+  metabase-data:
+  clickhouse-config:
+  postgres_data:
+    driver: local
+
+services:
+  clickhouse-server:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-server
+    environment:
+      - CLICKHOUSE_DB=clickhouse
+    ports:
+      - "8123:8123" # HTTP Interface
+      - "8000:9000" # Native Interface
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-config:/etc/clickhouse-server
+      - ./apps/clickhouse/migrations:/migrations
+      - ./apps/clickhouse/custom_entrypoint.sh:/custom_entrypoint.sh  # Mount your migration script
+      - ./apps/clickhouse/applied_migrations.txt:/var/lib/clickhouse/applied_migrations.txt
+    entrypoint: /custom_entrypoint.sh  # Run migrations before starting ClickHouse
+    restart: always  # Ensure the container always restarts if it fails
+  airflow-webserver:
+    image: apache/airflow:latest
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:postgres@postgres/Airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOGGING_LEVEL=INFO
+      - AIRFLOW__WEBSERVER__WORKER_REFRESH_BATCH_SIZE=10
+      - AIRFLOW__CORE__DEFAULT_TASK_LOG_READER=stream
+      - AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX=True
+      # username/password is set later 
+    volumes:
+      - ./apps/airflow/dags:/opt/airflow/dags
+      - ./apps/airflow/logs:/opt/airflow/logs
+      - ./apps/airflow/.env:/opt/airflow/.env
+    ports:
+      - "8081:8080"
+      - "8793:8793"  # Log server
+    depends_on:
+      - postgres
+    command: ["bash", "-c", "airflow db init && airflow webserver"]
+  airflow-scheduler:
+    build:
+      context: "./apps/airflow"
+    image: sala-airflow:latest
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:postgres@postgres/Airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOGGING_LEVEL=INFO
+      - AIRFLOW__WEBSERVER__WORKER_REFRESH_BATCH_SIZE=10
+      - AIRFLOW__CORE__DEFAULT_TASK_LOG_READER=stream
+      - AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX=True
+    volumes:
+      - ./apps/airflow/dags:/opt/airflow/dags
+      - ./apps/airflow/logs:/opt/airflow/logs
+      - ./apps/airflow/.env:/opt/airflow/.env
+    depends_on:
+      - postgres
+    command: ["bash", "-c", "airflow db init && airflow scheduler"]
+  metabase:
+    build:
+      context: "./apps/metabase"
+    image: sala-metabase:latest
+    container_name: metabase
+    ports:
+      - "3050:3000"  # Metabase web UI
+    platform: linux/amd64
+    volumes:
+      - metabase-data:/metabase-data  # Persist Metabase data
+    # environment:
+    #   - MB_DB_TYPE=clickhouse
+    #   - MB_DB_HOST=clickhouse-server
+    #   - MB_DB_PORT=9000
+    #   - MB_DB_USER=default
+    #   - MB_DB_PASSWORD=
+    #   - MB_DB_NAME=default
+    depends_on:
+      - clickhouse-server
+  mongodb:
+    image: mongo:5.0
+    container_name: mongodb
+    ports:
+      - 27017:27017
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=citizix
+      - MONGO_INITDB_ROOT_PASSWORD=S3cret
+  postgres:
+    image: postgres:14.1-alpine
+    # # # restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
