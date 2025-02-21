@@ -100,10 +100,6 @@ def load_students_to_clickhouse(**kwargs):
             VALUES {','.join(formatted_rows)}
         '''
 
-    # print(f"clickhouse query: {query}")
-    # Log the query before sending it to ClickHouse
-    # print(f"Query to ClickHouse: {query}")
-
     # Send the query using requests
     response = requests.post(
         url=clickhouse_url,

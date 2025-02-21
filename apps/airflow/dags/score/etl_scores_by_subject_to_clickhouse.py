@@ -5,13 +5,16 @@ from pymongo import MongoClient
 import pandas as pd
 import requests
 import json
+import logging
 from datetime import datetime
 from collections import defaultdict
+
 
 from dotenv import load_dotenv
 import os
 # Load environment variables from the .env file
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 default_args = {
     'owner': 'airflow',
@@ -85,7 +88,7 @@ def calculate_average_scores(evaluations, scores):
     for evaluation in evaluations:
         if evaluation.get('type') == 'subject' :
             avg_score = calculate_scores_recursively(evaluation)
-            if avg_score is not None:
+            if avg_score is not None :
                 print(f"average score of subject: {avg_score}")
                 print(f"evaluation: {evaluation}")
                 results.append({
@@ -122,29 +125,6 @@ def extract_data_from_mongodb(**kwargs):
         "_id": 0, "score": 1, "evaluationId": 1, "studentId": 1,
         "scorerId": 1, "markedAt": 1
         }))
-
-    # # Create a DataFrame for transformation
-    # df_evaluations = pd.DataFrame(evaluations)
-
-    # # Convert timestamps to string format for JSON serialization
-    # for col in df_evaluations.select_dtypes(include=['datetime', 'datetimetz']).columns:
-    #     print(f"It is datetime: {df_evaluations[col].dt}")
-    #     df_evaluations[col] = df_evaluations[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # evaluations = df_evaluations.to_dict('records')
-    
-    # df_scores = pd.DataFrame(scores)
-    # # Convert timestamps to string format for JSON serialization
-    # for col in df_scores.select_dtypes(include=['datetime', 'datetimetz']).columns:
-    #     df_scores[col] = df_scores[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # scores = df_scores.to_dict('records')
-
-    # # Remove MongoDB-specific fields (e.g., _id)
-    # if '_id' in df_evaluations.columns:
-    #     df_evaluations.drop(columns=['_id'], inplace=True)
-    
-    # return df_evaluations.to_dict('records')
 
     # Pass data to the next task
     kwargs['ti'].xcom_push(key='evaluations', value=evaluations)
@@ -192,6 +172,7 @@ def load_data_to_clickhouse(**kwargs):
                 # Leave other values (like numbers) as is
                 formatted_row[key] = value
         formatted_rows.append(formatted_row)
+    logger.info(data[0:10])
     query = '''
         INSERT INTO clickhouse.subject_score ("score", "maxScore", "evaluationId", "subjectId", "schoolId", "campusId",
          "groupStructureId", "structurePath", "templateId", "configGroupId" ) VALUES 

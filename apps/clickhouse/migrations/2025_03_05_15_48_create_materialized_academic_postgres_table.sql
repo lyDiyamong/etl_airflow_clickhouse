@@ -1,3 +1,3 @@
-CREATE DATABASE academic ENGINE = PostgreSQL(
-    'postgres:5432', 'dwd-academic', 'postgres', 'postgres'
+CREATE DATABASE IF NOT EXISTS academic ENGINE = PostgreSQL(
+    'postgres:5432', 'academic', 'postgres', 'postgres'
 );
