@@ -4,3 +4,5 @@ To install:
 3. go to project folder
 4. Build the container: docker compose up -d
 5. Create databases and Import some data
+6. Add env in airflow app
+7. create empty applied_migrations.txt file in clickhouse app
