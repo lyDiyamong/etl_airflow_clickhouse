@@ -16,26 +16,35 @@ CREATE TABLE student_month_subject_score
     studentLastName   String,
     studentFirstNameNative String,
     studentLastNameNative String,
-    idCard             String,   
+    idCard             String,
+    dob Nullable(DateTime),
+    gender String,
     -- if needed
     -- ... any other student fields you want
 
     -- Month Evaluation (Parent)
     monthEvaluationId UUID,
     monthName          String,
-    monthStartDate    DateTime, -- from attendanceColumn.startDate
-    monthEndDate      DateTime, -- from attendanceColumn.endDate
+    monthStartDate    Nullable(DateTime), -- from attendanceColumn.startDate
+    monthEndDate      Nullable(DateTime), -- from attendanceColumn.endDate
 
     -- Subject Evaluation (Child)
     subjectEvaluationId UUID,
     subjectName          String,
+    subjectNameNative   String,
     subjectMaxScore     Float64,  -- e.g. "maxScore"
+    coe     Int32,
+    code    String,
+    credit  Decimal(5,2),
+
+
+
     -- ... any other subject fields like "coe", "gradingMode" if needed
 
     -- Score Info
     score       Float64,    -- or Decimal(5,2)
     scorerId   UUID,
-    markedAt   DateTime,   -- from "markedAt"
+    markedAt   Nullable(DateTime),   -- from "markedAt"
     description String,     -- if you need the "description"
 
     -- Timestamps
