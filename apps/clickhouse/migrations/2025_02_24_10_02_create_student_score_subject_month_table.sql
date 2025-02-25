@@ -37,8 +37,6 @@ CREATE TABLE student_month_subject_score
     code    String,
     credit  Decimal(5,2),
 
-
-
     -- ... any other subject fields like "coe", "gradingMode" if needed
 
     -- Score Info
@@ -58,4 +56,4 @@ CREATE TABLE student_month_subject_score
     createdAt DateTime DEFAULT now()
 )
 ENGINE = MergeTree
-ORDER BY (monthEvaluationId, subjectEvaluationId, studentId);
+ORDER BY (studentId, subjectEvaluationId, structureRecordId);

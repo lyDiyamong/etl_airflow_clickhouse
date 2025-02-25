@@ -1,0 +1,475 @@
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.utils.dates import days_ago
+from pymongo import MongoClient
+import pandas as pd
+import requests
+import json
+import logging
+from datetime import datetime
+import uuid
+from collections import defaultdict
+
+from dotenv import load_dotenv
+import os
+# Load environment variables from the .env file
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'retries': 1,
+}
+
+def format_datetime(dt_str):
+    if not dt_str:
+        return None
+
+    # Handle the "datetime.date@version=2(1999-09-09)" format.
+    if dt_str and isinstance(dt_str, str) and dt_str.startswith("datetime.date@"):
+        # Extract the date part between '(' and ')'
+        start = dt_str.find('(')
+        end = dt_str.find(')')
+        if start != -1 and end != -1:
+            date_part = dt_str[start+1:end]
+            # Append a default time since ClickHouse DateTime expects a time component.
+            return date_part + " 00:00:00"
+        else:
+            return None
+
+    try:
+        # Parse ISO format datetime with milliseconds
+        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            # Try ISO format without milliseconds
+            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%SZ")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+def to_float(value):
+    if value is None:
+        return None  # Handle NoneType explicitly
+    try:
+        # Convert to float if possible
+        return float(value)
+    except ValueError:
+        # Handle cases where conversion is not possible
+        return None
+
+def get_grade_info(percentage):
+    """
+    Determine grade, GPA, and meaning based on percentage score.
+    
+    Args:
+        percentage (float): Score percentage (0-100)
+        
+    Returns:
+        tuple: (grade, gpa, meaning)
+    """
+    if percentage >= 85:
+        return "A", 4.00, "Excellent"
+    elif percentage >= 80:
+        return "B+", 3.50, "Very Good"
+    elif percentage >= 70:
+        return "B", 3.00, "Good"
+    elif percentage >= 65:
+        return "C+", 2.50, "Fairly Good"
+    elif percentage >= 50:
+        return "C", 2.00, "Fair"
+    elif percentage >= 45:
+        return "D", 1.50, "Poor"
+    elif percentage >= 40:
+        return "E", 1.00, "Very Poor"
+    else:
+        return "F", 0.00, "Failure"
+
+# Extracting data from MongoDB
+def extract_data_from_mongodb(**kwargs):
+    """Extract evaluations and score data from MongoDB."""
+    # Connect to MongoDB
+    client = MongoClient(os.getenv("MONGODB_URL"))
+    db = client[f'{os.getenv("DB_EVALUATION")}-{os.getenv("ENVIRONMENT")}']
+    
+    # Get all evaluations
+    evaluations = list(db['evaluations'].find({}, {
+        "_id": 0, "name": 1, "description": 1, "sort": 1, "maxScore": 1, 
+        "coe": 1, "type": 1, "parentId": 1, "schoolId": 1, "campusId": 1,
+        "groupStructureId": 1, "structurePath": 1, "evaluationId": 1, "templateId": 1, 
+        "configGroupId": 1, "referenceId": 1, "createdAt": 1
+    }))
+    
+    scores = list(db['scores'].find({}, {
+        "_id": 0, "score": 1, "evaluationId": 1, "studentId": 1, "idCard": 1,
+        "scorerId": 1, "markedAt": 1, "structurePath": 1
+    }))
+
+    # Pass data to the next task
+    kwargs['ti'].xcom_push(key='evaluations', value=evaluations)
+    kwargs['ti'].xcom_push(key='scores', value=scores)
+
+    client.close()
+
+# Extracting data from PostgreSQL
+def extract_data_from_postgres(**kwargs):
+    scores = kwargs['ti'].xcom_pull(key='scores', task_ids='extract_data_from_mongodb')
+    
+    # Extract the IDs from the score records
+    structure_ids = set(score['structurePath'].split("#")[1] for score in scores if score.get('structurePath'))
+    student_ids = set(score['studentId'] for score in scores if score.get('studentId'))
+
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local')
+    connection = postgres_hook.get_conn()
+
+    # Get structure data
+    with connection.cursor() as cursor:
+        sql_structure = f'''
+            SELECT "structureRecordId", "name", "groupStructureId"
+            FROM structure_record
+            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in structure_ids)})
+        '''
+        cursor.execute(sql_structure)
+        structure_data = cursor.fetchall()
+        structure_columns = [desc[0] for desc in cursor.description]
+        structure_record_records = pd.DataFrame(structure_data, columns=structure_columns).to_dict('records')
+
+    # Get student data
+    with connection.cursor() as cursor:
+        sql_student = f'''
+            SELECT "studentId", "firstName", "lastName", "firstNameNative", "lastNameNative", "dob", "gender", "campusId", "structureRecordId", "idCard"
+            FROM student
+            WHERE "studentId" IN ({", ".join("'" + stid + "'" for stid in student_ids)})
+        '''
+        cursor.execute(sql_student)
+        student_data = cursor.fetchall()
+        student_columns = [desc[0] for desc in cursor.description]
+        student_records = pd.DataFrame(student_data, columns=student_columns).to_dict('records')
+
+    # Get subject data
+    with connection.cursor() as cursor:
+        sql_subject = f'''
+            SELECT "subjectId", "name", "nameNative", "credit", "code", "structureRecordId", "coe"
+            FROM subject
+            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in structure_ids)})
+        '''
+        cursor.execute(sql_subject)
+        subject_data = cursor.fetchall()
+        subject_columns = [desc[0] for desc in cursor.description]
+        subject_records = pd.DataFrame(subject_data, columns=subject_columns).to_dict('records')
+    
+    connection.close()
+
+    # Push the extracted data to XCom
+    kwargs['ti'].xcom_push(key='structure_records', value=structure_record_records)
+    kwargs['ti'].xcom_push(key='students', value=student_records)
+    kwargs['ti'].xcom_push(key='subjects', value=subject_records)
+
+def calculate_subject_scores(evaluations, scores, students, structure_records, subjects):
+    """Transform raw data to calculate subject scores and aggregate them by student."""
+    
+    # 1. Build dictionaries for quick lookup
+    evaluations_by_id = {eval_rec['evaluationId']: eval_rec for eval_rec in evaluations}
+    
+    # Create separate dictionaries for each evaluation type
+    month_evaluations = {
+        eval_id: eval_rec 
+        for eval_id, eval_rec in evaluations_by_id.items() 
+        if eval_rec.get('type') == 'month'
+    }
+    
+    subject_evaluations = {
+        eval_id: eval_rec 
+        for eval_id, eval_rec in evaluations_by_id.items() 
+        if eval_rec.get('type') == 'subject'
+    }
+    
+    custom_evaluations = {
+        eval_id: eval_rec 
+        for eval_id, eval_rec in evaluations_by_id.items() 
+        if eval_rec.get('type') == 'custom'
+    }
+    
+    # Dictionary for student information keyed by studentId
+    student_dict = {stu['studentId']: stu for stu in students}
+    
+    # Dictionary for structure records keyed by structureRecordId
+    structure_dict = {s['structureRecordId']: s for s in structure_records}
+    
+    # Dictionary for subjects keyed by structureRecordId
+    subject_dict = {s['structureRecordId']: s for s in subjects}
+    
+    # 2. Group scores by (subject_evaluation_id, student_id)
+    subject_grouped_scores = defaultdict(list)
+    
+    for score in scores:
+        eval_id = score['evaluationId']
+        student_id = score['studentId']
+        
+        # Process direct subject scores
+        if eval_id in subject_evaluations:
+            key = (eval_id, student_id)
+            subject_grouped_scores[key].append(score)
+    
+    # 3. Process scores to create detailed subject records
+    subject_details_by_student = defaultdict(list)
+    scorers_by_student = {}
+    marked_at_by_student = {}
+    
+    # Process each subject-level group
+    for (subject_id, student_id), score_list in subject_grouped_scores.items():
+        if not score_list:
+            continue
+            
+        # Calculate final score (average if multiple scores)
+        score_values = [to_float(s.get('score')) for s in score_list if s.get('score') is not None]
+        if not score_values:
+            continue
+            
+        avg_score = sum(score_values) / len(score_values)
+        
+        # Get subject evaluation for max score
+        subject_eval = subject_evaluations.get(subject_id, {})
+        subject_max_score = to_float(subject_eval.get('maxScore', 100))
+        
+        # Calculate percentage
+        percentage = (avg_score / subject_max_score * 100) if subject_max_score > 0 else 0
+        
+        # Get grade information
+        grade, gpa, meaning = get_grade_info(percentage)
+        
+        # Get structure path from score if available
+        structure_record_id = None
+        if score_list[0].get('structurePath'):
+            parts = score_list[0]['structurePath'].split("#")
+            if len(parts) > 1:
+                structure_record_id = parts[1]
+        
+        # Get subject info
+        subject_info = None
+        for subj in subjects:
+            if subj.get('structureRecordId') == structure_record_id:
+                subject_info = subj
+                break
+        
+        # Store scorer and marked_at for latest update
+        scorers_by_student[student_id] = score_list[0].get('scorerId')
+        marked_at_by_student[student_id] = format_datetime(score_list[0].get('markedAt'))
+        
+        # Create a subject detail tuple
+        subject_detail = (
+            subject_id,  # subjectEvaluationId
+            subject_eval.get('name', ''),  # subjectName
+            subject_info.get('nameNative', '') if subject_info else '',  # subjectNameNative
+            subject_info.get('code', '') if subject_info else '',  # code
+            float(subject_info.get('credit', 0)) if subject_info else 0,  # credit
+            avg_score,  # score
+            percentage,  # percentage
+            grade,  # grade
+            meaning,  # meaning
+            gpa  # gpa
+        )
+        
+        # Add to student's subject details, keyed by (student_id, structure_record_id)
+        key = (student_id, structure_record_id)
+        subject_details_by_student[key].append(subject_detail)
+    
+    # 4. Aggregate into student transcript records
+    transcript_records = []
+    
+    for (student_id, structure_record_id), subject_details in subject_details_by_student.items():
+        if not subject_details:
+            continue
+        
+        # Get student info
+        student_info = student_dict.get(student_id, {})
+        
+        # Get structure info
+        structure_info = structure_dict.get(structure_record_id, {})
+        
+        # Calculate totals
+        total_credits = sum(detail[4] for detail in subject_details)
+        weighted_gpa_sum = sum(detail[4] * detail[9] for detail in subject_details)
+        total_gpa = weighted_gpa_sum / total_credits if total_credits > 0 else 0
+        
+        # Create the transcript record
+        record = {
+            # School & Campus info
+            'schoolId': subject_evaluations.get(subject_details[0][0], {}).get('schoolId'),
+            'campusId': student_info.get('campusId'),
+            
+            # Structure / Class Info
+            'structureRecordId': structure_record_id,
+            'structureRecordName': structure_info.get('name'),
+            'groupStructureId': structure_info.get('groupStructureId'),
+            'structurePath': f"#{structure_record_id}",
+            
+            # Student Info
+            'studentId': student_id,
+            'studentFirstName': student_info.get('firstName'),
+            'studentLastName': student_info.get('lastName'),
+            'studentFirstNameNative': student_info.get('firstNameNative'),
+            'studentLastNameNative': student_info.get('lastNameNative'),
+            'idCard': student_info.get('idCard'),
+            'gender': student_info.get("gender"),
+            'dob': student_info.get("dob"),
+            
+            # Subject Details (array of tuples)
+            'subjectDetails': subject_details,
+            
+            # Totals
+            'totalCredits': total_credits,
+            'totalGPA': total_gpa,
+            'subjectCount': len(subject_details),
+            
+            # Additional Info
+            'scorerId': scorers_by_student.get(student_id),
+            'markedAt': marked_at_by_student.get(student_id),
+            
+            # Timestamp
+            'createdAt': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        transcript_records.append(record)
+    
+    return transcript_records
+
+def transform_data(**kwargs):
+    """Transform data to calculate student transcripts"""
+    
+    # Retrieve data from XCom
+    evaluations = kwargs['ti'].xcom_pull(key='evaluations', task_ids='extract_data_from_mongodb')
+    scores = kwargs['ti'].xcom_pull(key='scores', task_ids='extract_data_from_mongodb')
+    students = kwargs['ti'].xcom_pull(key='students', task_ids='extract_data_from_postgres')
+    structure_records = kwargs['ti'].xcom_pull(key='structure_records', task_ids='extract_data_from_postgres')
+    subjects = kwargs['ti'].xcom_pull(key='subjects', task_ids='extract_data_from_postgres')
+
+    # Transform the data
+    transformed_data = calculate_subject_scores(evaluations, scores, students, structure_records, subjects)
+    logger.info(f"Generated {len(transformed_data)} transcript records")
+    
+    # Pass transformed data to the next task
+    kwargs['ti'].xcom_push(key='transformed_data', value=transformed_data)
+
+def load_data_to_clickhouse(**kwargs):
+    """Load data into ClickHouse."""
+    data = kwargs['ti'].xcom_pull(key='transformed_data', task_ids='transform_data')
+    
+    if not data:
+        logger.warning("No data to load into ClickHouse")
+        return
+    
+    # Prepare the ClickHouse HTTP endpoint and query
+    clickhouse_url = f'{os.getenv("CLICKHOUSE_HOST")}:{os.getenv("CLICKHOUSE_PORT")}'
+    
+    def format_value(value, key):
+        """Format values for ClickHouse with proper type handling."""
+        if key == 'dob':
+            # Use '0000-00-00 00:00:00' which ClickHouse treats as NULL for DateTime
+            return f"'{value}'"
+        if value is None:
+            return 'NULL'
+        
+        # Special handling for arrays of tuples (subjectDetails)
+        if key == 'subjectDetails':
+            formatted_tuples = []
+            for tup in value:
+                # Format each element in the tuple
+                elements = []
+                for i, elem in enumerate(tup):
+                    if i == 0:  # UUID
+                        elements.append(f"'{elem}'")
+                    elif isinstance(elem, str):
+                        escaped = elem.replace("'", "''")
+                        elements.append(f"'{escaped}'")
+                    else:
+                        elements.append(str(elem))
+                
+                formatted_tuples.append(f"({','.join(elements)})")
+            
+            return f"[{','.join(formatted_tuples)}]"
+        
+        # Format other types
+        elif isinstance(value, str):
+            escaped_value = value.replace("'", "''")
+            return f"'{escaped_value}'"
+        else:
+            return str(value)
+    
+    # Build the formatted row values
+    formatted_rows = []
+    table_keys = list(data[0].keys())
+    
+    for row in data:
+        formatted_values = [format_value(row[key], key) for key in table_keys]
+        formatted_rows.append(f"({','.join(formatted_values)})")
+    
+    # Construct the query
+    query = f'INSERT INTO clickhouse.student_transcript ({",".join(table_keys)}) VALUES '
+    rows_joined = ",".join(formatted_rows)
+    query += rows_joined
+    
+    # Send the query using requests
+    try:
+        response = requests.post(
+            url=clickhouse_url,
+            data=query,
+            headers={'Content-Type': 'text/plain'},
+            auth=(os.getenv("CLICKHOUSE_USER"), os.getenv("CLICKHOUSE_PASSWORD"))
+        )
+        
+        if response.status_code != 200:
+            error_msg = f"Failed to load data to ClickHouse: {response.text}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        
+        logger.info(f"Successfully loaded {len(data)} records into student_transcript table")
+    except Exception as e:
+        logger.error(f"Error loading data to ClickHouse: {str(e)}")
+        raise
+
+# Define the DAG
+dag = DAG(
+    'student_transcript_etl',
+    default_args=default_args,
+    description='Extract score data, transform it into student transcripts, and load into ClickHouse',
+    schedule_interval='@daily',
+    start_date=days_ago(1),
+    catchup=False,
+    tags=['evaluation', 'transcript', 'academic']
+)
+
+# Define tasks
+extract_task_mongo = PythonOperator(
+    task_id='extract_data_from_mongodb',
+    python_callable=extract_data_from_mongodb,
+    provide_context=True,
+    dag=dag,
+)
+
+extract_task_postgres = PythonOperator(
+    task_id='extract_data_from_postgres',
+    python_callable=extract_data_from_postgres,
+    provide_context=True,
+    dag=dag,
+)
+
+transform_task = PythonOperator(
+    task_id='transform_data',
+    python_callable=transform_data,
+    provide_context=True,
+    dag=dag,
+)
+
+load_task = PythonOperator(
+    task_id='load_data_to_clickhouse',
+    python_callable=load_data_to_clickhouse,
+    provide_context=True,
+    dag=dag,
+)
+
+# Set task dependencies
+extract_task_mongo >> extract_task_postgres >> transform_task >> load_task
