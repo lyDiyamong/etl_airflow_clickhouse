@@ -17,7 +17,7 @@ CREATE TABLE student_month_subject_score
     studentFirstNameNative String,
     studentLastNameNative String,
     idCard             String,
-    dob Nullable(DateTime),
+    dob         Nullable(Date),
     gender String,
     -- if needed
     -- ... any other student fields you want
@@ -43,6 +43,13 @@ CREATE TABLE student_month_subject_score
 
     -- Score Info
     score       Float64,    -- or Decimal(5,2)
+    percentage       Float64,
+    grade   String,
+    meaning String,
+    gpa     Float64,
+    scoreSource String,
+    customEvaluationCount Int32,
+    customEvaluations String,
     scorerId   UUID,
     markedAt   Nullable(DateTime),   -- from "markedAt"
     description String,     -- if you need the "description"
