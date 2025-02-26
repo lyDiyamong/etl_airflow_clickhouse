@@ -93,52 +93,42 @@ def get_grade_info(percentage):
 def assign_ranks(transcript_records):
     """Assign ranks for each student per subject in the same class and month."""
     
-    # Group by structureRecordId (class) and month
+    # Group by (structureRecordId, monthEvaluationId, subjectEvaluationId)
     rankings_by_subject_month = defaultdict(list)
     
     for record in transcript_records:
         for subject in record['subjectDetails']:
             subject_evaluation_id = subject[0]  # subjectEvaluationId
-            month_evaluation_id = subject[14]  # monthEvaluationId
-            score = subject[5]  # score
+            month_evaluation_id = subject[15]     # monthEvaluationId (corrected index)
+            score = subject[5]                    # score
             
-            # Group students by (structureRecordId, monthEvaluationId, subjectEvaluationId)
-            rankings_by_subject_month[(record['structureRecordId'], month_evaluation_id, subject_evaluation_id)].append(
-                (record['studentId'], score)
-            )
+            key = (record['structureRecordId'], month_evaluation_id, subject_evaluation_id)
+            rankings_by_subject_month[key].append((record['studentId'], score))
     
-    # Assign ranks within each group
-    student_ranks = {}  # To store assigned ranks
-
-    for key, students in rankings_by_subject_month.items():
-        # Sort students by score (descending order)
-        students.sort(key=lambda x: x[1], reverse=True)
-
-        rank = 1
-        prev_score = None
-        rank_offset = 0  # Tracks ties
+    # Assign ranks within each group using standard competition ranking ("1224" style)
+    student_ranks = {}
+    
+    for key, student_list in rankings_by_subject_month.items():
+        # Sort students by score in descending order
+        student_list.sort(key=lambda x: x[1], reverse=True)
         
-        for i, (student_id, score) in enumerate(students):
-            if prev_score is not None and score < prev_score:
-                rank += rank_offset + 1
-                rank_offset = 0
-            else:
-                rank_offset += 1
-
-            prev_score = score
-            student_ranks[(key, student_id)] = rank
+        current_rank = 1
+        for i, (student_id, score) in enumerate(student_list):
+            if i > 0 and score < student_list[i-1][1]:
+                current_rank = i + 1
+            student_ranks[(key, student_id)] = current_rank
     
-    # Update transcript records with rank
+    # Update transcript records with the assigned rank
     for record in transcript_records:
         updated_subject_details = []
         for subject in record['subjectDetails']:
             subject_evaluation_id = subject[0]
-            month_evaluation_id = subject[14]
+            month_evaluation_id = subject[15]  # corrected index
+            # Lookup rank with the same key structure
+            rank = student_ranks.get(((record['structureRecordId'], month_evaluation_id, subject_evaluation_id), record['studentId']), None)
             
-            rank = student_ranks.get((record['structureRecordId'], month_evaluation_id, subject_evaluation_id, record['studentId']), None)
-            
-            # Append rank to subject details
-            updated_subject_details.append(subject + (rank,))  # Adding rank as last element
+            # Append rank as the last element in the tuple
+            updated_subject_details.append(subject + (rank,))
         
         record['subjectDetails'] = updated_subject_details
     
@@ -508,10 +498,13 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         
         transcript_records.append(record)
     new_transcript_records = assign_ranks(transcript_records)
-    logger.info(f'transcript_record {new_transcript_records[447:450]}')
+    
+    logger.info(f'New transcript_record {new_transcript_records[500:510]}')
+    logger.info(f'Old transcript_record {transcript_records[500:510]}')
+
     logger.info(f'transcript_record {len(new_transcript_records)}')
 
-    return transcript_records
+    return new_transcript_records
 
 
 
@@ -640,13 +633,13 @@ transform_task = PythonOperator(
     dag=dag,
 )
 
-# load_task = PythonOperator(
-#     task_id='load_data_to_clickhouse',
-#     python_callable=load_data_to_clickhouse,
-#     provide_context=True,
-#     dag=dag,
-# )
+load_task = PythonOperator(
+    task_id='load_data_to_clickhouse',
+    python_callable=load_data_to_clickhouse,
+    provide_context=True,
+    dag=dag,
+)
 
 # Set task dependencies
-extract_task_mongo >> extract_task_postgres >> transform_task 
-#  >> load_task
+extract_task_mongo >> extract_task_postgres >> transform_task >> load_task
+#  

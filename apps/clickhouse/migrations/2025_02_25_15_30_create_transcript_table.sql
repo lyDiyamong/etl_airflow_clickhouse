@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS student_transcript_staging (
 
             semesterName    Nullable(String),
             semesterEvaluationId    Nullable(UUID),
+            rank    Nullable(UInt32),
 
         )
     ),
