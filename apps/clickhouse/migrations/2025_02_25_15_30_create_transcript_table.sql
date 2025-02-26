@@ -27,15 +27,22 @@ CREATE TABLE IF NOT EXISTS student_transcript_staging (
             subjectNameNative String,
             code String,
             credit Decimal(5,2),
-            score Float64,
-            percentage Float64,
+            score Decimal(5,2),
+            maxScore Float64,
+            percentage Decimal(5,2),
             grade String,
             meaning String,
-            gpa Float64,
+            gpa Decimal(5,2),
             -- Parent : could be month and semester
             subjectParentName String,
             subjectParentEvaluationId UUID,
-            subjectParentType String
+            subjectParentType String,
+
+            monthName   Nullable(String),
+            monthEvaluationId   Nullable(UUID),
+
+            semesterName    Nullable(String),
+            semesterEvaluationId    Nullable(UUID),
 
         )
     ),

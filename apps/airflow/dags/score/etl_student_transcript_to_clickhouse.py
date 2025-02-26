@@ -181,7 +181,6 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
     evaluations_by_id = {eval_rec['evaluationId']: eval_rec for eval_rec in evaluations}
     
     # Create separate dictionaries for each evaluation type
-    
     subject_evaluations = {
         eval_id: eval_rec 
         for eval_id, eval_rec in evaluations_by_id.items() 
@@ -203,98 +202,198 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
     # Dictionary for subjects keyed by structureRecordId
     subject_dict = {s['structureRecordId']: s for s in subjects}
     
-    # 2. Group scores by (subject_evaluation_id, student_id)
-    subject_grouped_scores = defaultdict(list)
+    # Map custom evaluations to their parent subjects
+    custom_by_parent = defaultdict(list)
+    for eval_id, eval_rec in custom_evaluations.items():
+        parent_id = eval_rec.get('parentId')
+        if parent_id and parent_id in subject_evaluations:
+            custom_by_parent[parent_id].append(eval_id)
+    
+    # 2. Group scores by (evaluation_id, student_id)
+    grouped_scores = defaultdict(list)
     
     for score in scores:
         eval_id = score['evaluationId']
         student_id = score['studentId']
         
-        # Process direct subject scores
-        if eval_id in subject_evaluations:
-            key = (eval_id, student_id)
-            subject_grouped_scores[key].append(score)
+        # Process all evaluation types
+        key = (eval_id, student_id)
+        grouped_scores[key].append(score)
     
-    # 3. Process scores to create detailed subject records
+    # 3. Process custom scores first to calculate subject scores
+    subject_custom_scores = {}
+    
+    for subject_id, custom_eval_ids in custom_by_parent.items():
+        for student_id in {score['studentId'] for score in scores}:
+            custom_percentages = []
+            
+            for custom_id in custom_eval_ids:
+                key = (custom_id, student_id)
+                if key not in grouped_scores:
+                    continue
+                
+                custom_score_list = grouped_scores[key]
+                if not custom_score_list:
+                    continue
+                
+                # Calculate average for this custom evaluation
+                score_values = [to_float(s.get('score')) for s in custom_score_list if s.get('score') is not None]
+                clean_score_values = [0 if score is None else score for score in score_values]
+                if not clean_score_values:
+                    continue
+                
+                custom_avg = sum(clean_score_values) / len(clean_score_values)
+                
+                # Get custom evaluation for max score
+                custom_eval = custom_evaluations.get(custom_id, {})
+                custom_max = to_float(custom_eval.get('maxScore', 100))
+                
+                # Calculate percentage
+                custom_percentage = (custom_avg / custom_max * 100) if custom_max > 0 else 0
+                custom_percentages.append(custom_percentage)
+            
+            # Only calculate if we have custom scores
+            if custom_percentages:
+                # Average of all custom percentages
+                avg_custom_percentage = sum(custom_percentages) / len(custom_percentages)
+                
+                # Get subject max score to convert percentage back to absolute score
+                subject_eval = subject_evaluations.get(subject_id, {})
+                subject_max = to_float(subject_eval.get('maxScore', 100))
+                
+                # Calculate final subject score based on custom percentages
+                final_subject_score = (avg_custom_percentage * subject_max) / 100
+                
+                # Store for later use
+                subject_custom_scores[(subject_id, student_id)] = final_subject_score
+    
+    # 4. Process scores to create detailed subject records
     subject_details_by_student = defaultdict(list)
     scorers_by_student = {}
     marked_at_by_student = {}
     
-    # Process each subject-level group
-    for (subject_id, student_id), score_list in subject_grouped_scores.items():
-        if not score_list:
-            continue
+    # Process each subject level group
+    for subject_id, subject_eval in subject_evaluations.items():
+        for student_id in {score['studentId'] for score in scores}:
+            key = (subject_id, student_id)
             
-        # Calculate final score (average if multiple scores)
-        score_values = [to_float(s.get('score')) for s in score_list if s.get('score') is not None]
-        clean_score_values = [0 if score is None else score for score in score_values]
-        if not clean_score_values:
-            continue
+            # Determine final score prioritizing direct scores over custom-derived scores
+            final_score = None
+            score_list = grouped_scores.get(key, [])
+            latest_score = None
             
-        avg_score = sum(clean_score_values) / len(clean_score_values)
-        
-        # Get subject evaluation for max score
-        subject_eval = subject_evaluations.get(subject_id, {})
-        subject_max_score = to_float(subject_eval.get('maxScore', 100))
-        
-        # Calculate percentage
-        percentage = (avg_score / subject_max_score * 100) if subject_max_score > 0 else 0
-        
-        # Get grade information
-        grade, gpa, meaning = get_grade_info(percentage)
-        
-        # Get structure path from score if available
-        structure_record_id = None
-        if score_list[0].get('structurePath'):
-            parts = score_list[0]['structurePath'].split("#")
-            if len(parts) > 1:
-                structure_record_id = parts[1]
-        
-        # Get subject info from subjects dictionary
-        subject_info = None
-        for subj in subjects:
-            if subj.get('structureRecordId') == structure_record_id:
-                subject_info = subj
-                break
-        
-        # Store scorer and marked_at for latest update
-        scorers_by_student[student_id] = score_list[0].get('scorerId')
-        marked_at_by_student[student_id] = format_datetime(score_list[0].get('markedAt'))
-        
-        # --- Determine parent evaluation info (month or semester) ---
-        subject_parent_name = ""
-        subject_parent_evaluation_id = None
-        subject_parent_type = ""
-        parent_id = subject_eval.get('parentId')
-        if parent_id and parent_id != "na":
-            parent_eval = evaluations_by_id.get(parent_id, {})
-            subject_parent_name = parent_eval.get('name', "")
-            subject_parent_evaluation_id = parent_eval.get('evaluationId')
-            subject_parent_type = parent_eval.get('type', '')
-        
-        # Create a subject detail tuple with parent info included
-        subject_detail = (
-            subject_id,                                          # subjectEvaluationId
-            subject_eval.get('name', ''),                        # subjectName
-            subject_info.get('nameNative', '') if subject_info else '',  # subjectNameNative
-            subject_info.get('code', '') if subject_info else '',         # code
-            float(subject_info.get('credit', 0)) if subject_info else 0,    # credit
-            avg_score,                                           # score
-            percentage,                                          # percentage
-            grade,                                               # grade
-            meaning,                                             # meaning
-            gpa,                                                 # gpa
-            subject_parent_name,                                 # subjectParentName (from month/semester)
-            subject_parent_evaluation_id,                         # subjectParentEvaluationId,
-            subject_parent_type                                  # subjectParentType
+            if score_list:
+                # Use direct subject scores if available
+                score_values = [to_float(s.get('score')) for s in score_list if s.get('score') is not None]
+                clean_score_values = [0 if score is None else score for score in score_values]
+                if clean_score_values:
+                    final_score = sum(clean_score_values) / len(clean_score_values)
+                    latest_score = score_list[0]  # Assuming scores are in chronological order
+            
+            # If no direct scores, use aggregate of custom scores if available
+            if final_score is None and key in subject_custom_scores:
+                final_score = subject_custom_scores[key]
+                # Need to find a latest score for marker info
+                for custom_id in custom_by_parent.get(subject_id, []):
+                    custom_scores = grouped_scores.get((custom_id, student_id), [])
+                    if custom_scores and (latest_score is None or 
+                            custom_scores[0].get('markedAt', '') > latest_score.get('markedAt', '')):
+                        latest_score = custom_scores[0]
+            
+            # Skip if no score available
+            if final_score is None or latest_score is None:
+                continue
+            
+            # Get subject evaluation for max score
+            subject_max_score = to_float(subject_eval.get('maxScore', 100))
+            
+            # Calculate percentage
+            percentage = (final_score / subject_max_score * 100) if subject_max_score > 0 else 0
+            
+            # Get grade information
+            grade, gpa, meaning = get_grade_info(percentage)
+            
+            # Get structure path from score if available
+            structure_record_id = None
+            if latest_score.get('structurePath'):
+                parts = latest_score['structurePath'].split("#")
+                if len(parts) > 1:
+                    structure_record_id = parts[1]
+            
+            # Get subject info from subjects dictionary
+            subject_info = None
+            for subj in subjects:
+                if subj.get('structureRecordId') == structure_record_id:
+                    subject_info = subj
+                    break
+            
+            # Store scorer and marked_at for latest update
+            scorers_by_student[student_id] = latest_score.get('scorerId')
+            marked_at_by_student[student_id] = format_datetime(latest_score.get('markedAt'))
+            
+            # --- Determine parent evaluation info (month or semester) ---
+            subject_parent_name = ""
+            subject_parent_evaluation_id = None
+            subject_parent_type = ""
+            month_name = ""
+            month_evaluation_id = None
+            semester_name = ""
+            semester_evaluation_id = None
+            
+            # First check direct parent
+            parent_id = subject_eval.get('parentId')
+            if parent_id and parent_id != "na":
+                parent_eval = evaluations_by_id.get(parent_id, {})
+                subject_parent_name = parent_eval.get('name', "")
+                subject_parent_evaluation_id = parent_eval.get('evaluationId')
+                subject_parent_type = parent_eval.get('type', '')
+                
+                # Check if parent is month or semester and set accordingly
+                if subject_parent_type == 'month':
+                    month_name = subject_parent_name
+                    month_evaluation_id = subject_parent_evaluation_id
+                    
+                    # Check if month has a semester parent
+                    month_parent_id = parent_eval.get('parentId')
+                    if month_parent_id and month_parent_id != "na":
+                        semester_eval = evaluations_by_id.get(month_parent_id, {})
+                        if semester_eval.get('type') == 'semester':
+                            semester_name = semester_eval.get('name', "")
+                            semester_evaluation_id = semester_eval.get('evaluationId')
+                
+                elif subject_parent_type == 'semester':
+                    semester_name = subject_parent_name
+                    semester_evaluation_id = subject_parent_evaluation_id
+            
+            # Create a subject detail tuple with parent info included
+            subject_detail = (
+                subject_id,                                          # subjectEvaluationId
+                subject_eval.get('name', ''),                        # subjectName
+                subject_info.get('nameNative', '') if subject_info else '',  # subjectNameNative
+                subject_info.get('code', '') if subject_info else '',         # code
+                float(subject_info.get('credit', 0)) if subject_info else 0,    # credit
+                final_score,                                         # score
+                subject_eval.get('maxScore', ''),
+                percentage,                                          # percentage
+                grade,                                               # grade
+                meaning,                                             # meaning
+                gpa,                                                 # gpa
+                subject_parent_name,                                 # subjectParentName (from direct parent)
+                subject_parent_evaluation_id,                        # subjectParentEvaluationId
+                subject_parent_type,                                 # subjectParentType
+                month_name,                                          # monthName
+                month_evaluation_id,                                 # monthEvaluationId
 
-        )
-        
-        # Add to student's subject details, keyed by (student_id, structure_record_id)
-        key = (student_id, structure_record_id)
-        subject_details_by_student[key].append(subject_detail)
+                semester_name,                                       # semesterName
+                semester_evaluation_id,                               # semesterEvaluationId
+
+            )
+            
+            # Add to student's subject details, keyed by (student_id, structure_record_id)
+            key = (student_id, structure_record_id)
+            subject_details_by_student[key].append(subject_detail)
     
-    # 4. Aggregate into student transcript records
+    # 5. Aggregate into student transcript records
     transcript_records = []
     
     for (student_id, structure_record_id), subject_details in subject_details_by_student.items():
@@ -309,7 +408,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         
         # Calculate totals
         total_credits = sum(detail[4] for detail in subject_details)
-        weighted_gpa_sum = sum(detail[4] * detail[9] for detail in subject_details)
+        weighted_gpa_sum = sum(detail[4] * detail[10] for detail in subject_details)
         total_gpa = weighted_gpa_sum / total_credits if total_credits > 0 else 0
         
         # Create the transcript record
@@ -351,7 +450,10 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         }
         
         transcript_records.append(record)
-    logger.info(f'transcript_record {transcript_records[0:4]}')
+    
+    logger.info(f'transcript_record {transcript_records[20:30]}')
+    logger.info(f'transcript_record {len(transcript_records)}')
+
     return transcript_records
 
 def transform_data(**kwargs):
@@ -487,5 +589,5 @@ load_task = PythonOperator(
 )
 
 # Set task dependencies
-extract_task_mongo >> extract_task_postgres >> transform_task >> load_task
+extract_task_mongo >> extract_task_postgres >> transform_task  >> load_task
 # 
