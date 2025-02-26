@@ -89,6 +89,61 @@ def get_grade_info(percentage):
     else:
         return "F", 0.00, "Failure"
 
+# Assign rank by each subject 
+def assign_ranks(transcript_records):
+    """Assign ranks for each student per subject in the same class and month."""
+    
+    # Group by structureRecordId (class) and month
+    rankings_by_subject_month = defaultdict(list)
+    
+    for record in transcript_records:
+        for subject in record['subjectDetails']:
+            subject_evaluation_id = subject[0]  # subjectEvaluationId
+            month_evaluation_id = subject[14]  # monthEvaluationId
+            score = subject[5]  # score
+            
+            # Group students by (structureRecordId, monthEvaluationId, subjectEvaluationId)
+            rankings_by_subject_month[(record['structureRecordId'], month_evaluation_id, subject_evaluation_id)].append(
+                (record['studentId'], score)
+            )
+    
+    # Assign ranks within each group
+    student_ranks = {}  # To store assigned ranks
+
+    for key, students in rankings_by_subject_month.items():
+        # Sort students by score (descending order)
+        students.sort(key=lambda x: x[1], reverse=True)
+
+        rank = 1
+        prev_score = None
+        rank_offset = 0  # Tracks ties
+        
+        for i, (student_id, score) in enumerate(students):
+            if prev_score is not None and score < prev_score:
+                rank += rank_offset + 1
+                rank_offset = 0
+            else:
+                rank_offset += 1
+
+            prev_score = score
+            student_ranks[(key, student_id)] = rank
+    
+    # Update transcript records with rank
+    for record in transcript_records:
+        updated_subject_details = []
+        for subject in record['subjectDetails']:
+            subject_evaluation_id = subject[0]
+            month_evaluation_id = subject[14]
+            
+            rank = student_ranks.get((record['structureRecordId'], month_evaluation_id, subject_evaluation_id, record['studentId']), None)
+            
+            # Append rank to subject details
+            updated_subject_details.append(subject + (rank,))  # Adding rank as last element
+        
+        record['subjectDetails'] = updated_subject_details
+    
+    return transcript_records
+
 # Extracting data from MongoDB
 def extract_data_from_mongodb(**kwargs):
     """Extract evaluations and score data from MongoDB."""
@@ -114,6 +169,8 @@ def extract_data_from_mongodb(**kwargs):
     kwargs['ti'].xcom_push(key='scores', value=scores)
 
     client.close()
+
+
 
 # Extracting data from PostgreSQL
 def extract_data_from_postgres(**kwargs):
@@ -450,11 +507,13 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         }
         
         transcript_records.append(record)
-    
-    logger.info(f'transcript_record {transcript_records[20:30]}')
-    logger.info(f'transcript_record {len(transcript_records)}')
+    new_transcript_records = assign_ranks(transcript_records)
+    logger.info(f'transcript_record {new_transcript_records[447:450]}')
+    logger.info(f'transcript_record {len(new_transcript_records)}')
 
     return transcript_records
+
+
 
 def transform_data(**kwargs):
     """Transform data to calculate student transcripts"""
@@ -581,13 +640,13 @@ transform_task = PythonOperator(
     dag=dag,
 )
 
-load_task = PythonOperator(
-    task_id='load_data_to_clickhouse',
-    python_callable=load_data_to_clickhouse,
-    provide_context=True,
-    dag=dag,
-)
+# load_task = PythonOperator(
+#     task_id='load_data_to_clickhouse',
+#     python_callable=load_data_to_clickhouse,
+#     provide_context=True,
+#     dag=dag,
+# )
 
 # Set task dependencies
-extract_task_mongo >> extract_task_postgres >> transform_task  >> load_task
-# 
+extract_task_mongo >> extract_task_postgres >> transform_task 
+#  >> load_task
