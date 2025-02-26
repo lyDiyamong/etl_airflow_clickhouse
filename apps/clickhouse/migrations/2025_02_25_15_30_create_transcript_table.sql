@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS student_transcript (
+CREATE TABLE IF NOT EXISTS student_transcript_staging (
     -- School & Campus
     schoolId UUID,
     campusId UUID,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS student_transcript (
     
     -- Totals
     totalCredits Decimal(7,2),
-    totalGPA Float64,
+    totalGPA Decimal(5,2),
     subjectCount UInt32,
     
     -- Additional Info

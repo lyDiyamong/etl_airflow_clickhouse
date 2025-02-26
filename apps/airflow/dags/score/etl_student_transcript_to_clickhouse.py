@@ -120,18 +120,22 @@ def extract_data_from_postgres(**kwargs):
     
     # Extract the IDs from the score records
     structure_ids = set(score['structurePath'].split("#")[1] for score in scores if score.get('structurePath'))
+    cleaned_structure_ids = {sid for sid in structure_ids if sid != "undefined"}
     student_ids = set(score['studentId'] for score in scores if score.get('studentId'))
 
-    postgres_hook = PostgresHook(postgres_conn_id='academic-local')
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging')
     connection = postgres_hook.get_conn()
+
+    logger.info(f'Structure record ids {structure_ids}')
 
     # Get structure data
     with connection.cursor() as cursor:
         sql_structure = f'''
             SELECT "structureRecordId", "name", "groupStructureId"
             FROM structure_record
-            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in structure_ids)})
+            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)})
         '''
+        logger.info(f"Student sql: {sql_structure}")
         cursor.execute(sql_structure)
         structure_data = cursor.fetchall()
         structure_columns = [desc[0] for desc in cursor.description]
@@ -144,6 +148,7 @@ def extract_data_from_postgres(**kwargs):
             FROM student
             WHERE "studentId" IN ({", ".join("'" + stid + "'" for stid in student_ids)})
         '''
+        
         cursor.execute(sql_student)
         student_data = cursor.fetchall()
         student_columns = [desc[0] for desc in cursor.description]
@@ -154,7 +159,7 @@ def extract_data_from_postgres(**kwargs):
         sql_subject = f'''
             SELECT "subjectId", "name", "nameNative", "credit", "code", "structureRecordId", "coe"
             FROM subject
-            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in structure_ids)})
+            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)})
         '''
         cursor.execute(sql_subject)
         subject_data = cursor.fetchall()
@@ -226,10 +231,11 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             
         # Calculate final score (average if multiple scores)
         score_values = [to_float(s.get('score')) for s in score_list if s.get('score') is not None]
-        if not score_values:
+        clean_score_values = [score for score in score_values if score != None]
+        if not clean_score_values:
             continue
             
-        avg_score = sum(score_values) / len(score_values)
+        avg_score = sum(clean_score_values) / len(clean_score_values)
         
         # Get subject evaluation for max score
         subject_eval = subject_evaluations.get(subject_id, {})
@@ -367,50 +373,48 @@ def load_data_to_clickhouse(**kwargs):
     
     def format_value(value, key):
         """Format values for ClickHouse with proper type handling."""
-        if key == 'dob':
-            # Use '0000-00-00 00:00:00' which ClickHouse treats as NULL for DateTime
-            return f"'{value}'"
         if value is None:
-            return 'NULL'
-        
-        # Special handling for arrays of tuples (subjectDetails)
+            return "NULL"  # Ensure None is converted to NULL
+
+        if key == 'dob':
+            # Use '0000-00-00 00:00:00' for missing DateTime values
+            return f"'{value}'"
+
         if key == 'subjectDetails':
             formatted_tuples = []
             for tup in value:
-                # Format each element in the tuple
                 elements = []
                 for i, elem in enumerate(tup):
-                    if i == 0:  # UUID
+                    if elem is None:  # Convert None inside tuples as well
+                        elements.append("NULL")
+                    elif i == 0:  # UUID
                         elements.append(f"'{elem}'")
                     elif isinstance(elem, str):
                         escaped = elem.replace("'", "''")
                         elements.append(f"'{escaped}'")
                     else:
                         elements.append(str(elem))
-                
                 formatted_tuples.append(f"({','.join(elements)})")
             
             return f"[{','.join(formatted_tuples)}]"
-        
-        # Format other types
+
         elif isinstance(value, str):
             escaped_value = value.replace("'", "''")
             return f"'{escaped_value}'"
-        else:
-            return str(value)
-    
+        
+        return str(value)
+
     # Build the formatted row values
     formatted_rows = []
     table_keys = list(data[0].keys())
-    
+
     for row in data:
         formatted_values = [format_value(row[key], key) for key in table_keys]
         formatted_rows.append(f"({','.join(formatted_values)})")
-    
+
     # Construct the query
-    query = f'INSERT INTO clickhouse.student_transcript ({",".join(table_keys)}) VALUES '
-    rows_joined = ",".join(formatted_rows)
-    query += rows_joined
+    query = f'INSERT INTO clickhouse.student_transcript_staging ({",".join(table_keys)}) VALUES '
+    query += ",".join(formatted_rows)
     
     # Send the query using requests
     try:

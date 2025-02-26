@@ -1,4 +1,4 @@
-CREATE TABLE student_month_subject_score
+CREATE TABLE student_month_subject_score_staging
 (
     -- School & Campus
     schoolId UUID,
