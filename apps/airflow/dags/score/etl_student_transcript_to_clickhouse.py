@@ -1,3 +1,4 @@
+from yaml import load_all
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -180,11 +181,6 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
     evaluations_by_id = {eval_rec['evaluationId']: eval_rec for eval_rec in evaluations}
     
     # Create separate dictionaries for each evaluation type
-    month_evaluations = {
-        eval_id: eval_rec 
-        for eval_id, eval_rec in evaluations_by_id.items() 
-        if eval_rec.get('type') == 'month'
-    }
     
     subject_evaluations = {
         eval_id: eval_rec 
@@ -231,7 +227,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             
         # Calculate final score (average if multiple scores)
         score_values = [to_float(s.get('score')) for s in score_list if s.get('score') is not None]
-        clean_score_values = [score for score in score_values if score != None]
+        clean_score_values = [0 if score is None else score for score in score_values]
         if not clean_score_values:
             continue
             
@@ -254,7 +250,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             if len(parts) > 1:
                 structure_record_id = parts[1]
         
-        # Get subject info
+        # Get subject info from subjects dictionary
         subject_info = None
         for subj in subjects:
             if subj.get('structureRecordId') == structure_record_id:
@@ -265,18 +261,33 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         scorers_by_student[student_id] = score_list[0].get('scorerId')
         marked_at_by_student[student_id] = format_datetime(score_list[0].get('markedAt'))
         
-        # Create a subject detail tuple
+        # --- Determine parent evaluation info (month or semester) ---
+        subject_parent_name = ""
+        subject_parent_evaluation_id = None
+        subject_parent_type = ""
+        parent_id = subject_eval.get('parentId')
+        if parent_id and parent_id != "na":
+            parent_eval = evaluations_by_id.get(parent_id, {})
+            subject_parent_name = parent_eval.get('name', "")
+            subject_parent_evaluation_id = parent_eval.get('evaluationId')
+            subject_parent_type = parent_eval.get('type', '')
+        
+        # Create a subject detail tuple with parent info included
         subject_detail = (
-            subject_id,  # subjectEvaluationId
-            subject_eval.get('name', ''),  # subjectName
+            subject_id,                                          # subjectEvaluationId
+            subject_eval.get('name', ''),                        # subjectName
             subject_info.get('nameNative', '') if subject_info else '',  # subjectNameNative
-            subject_info.get('code', '') if subject_info else '',  # code
-            float(subject_info.get('credit', 0)) if subject_info else 0,  # credit
-            avg_score,  # score
-            percentage,  # percentage
-            grade,  # grade
-            meaning,  # meaning
-            gpa  # gpa
+            subject_info.get('code', '') if subject_info else '',         # code
+            float(subject_info.get('credit', 0)) if subject_info else 0,    # credit
+            avg_score,                                           # score
+            percentage,                                          # percentage
+            grade,                                               # grade
+            meaning,                                             # meaning
+            gpa,                                                 # gpa
+            subject_parent_name,                                 # subjectParentName (from month/semester)
+            subject_parent_evaluation_id,                         # subjectParentEvaluationId,
+            subject_parent_type                                  # subjectParentType
+
         )
         
         # Add to student's subject details, keyed by (student_id, structure_record_id)
@@ -323,7 +334,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             'gender': student_info.get("gender"),
             'dob': student_info.get("dob"),
             
-            # Subject Details (array of tuples)
+            # Subject Details (array of tuples with parent info)
             'subjectDetails': subject_details,
             
             # Totals
@@ -340,7 +351,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         }
         
         transcript_records.append(record)
-    
+    logger.info(f'transcript_record {transcript_records[0:4]}')
     return transcript_records
 
 def transform_data(**kwargs):
@@ -477,3 +488,4 @@ load_task = PythonOperator(
 
 # Set task dependencies
 extract_task_mongo >> extract_task_postgres >> transform_task >> load_task
+# 

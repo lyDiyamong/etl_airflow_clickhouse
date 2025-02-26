@@ -31,13 +31,18 @@ CREATE TABLE IF NOT EXISTS student_transcript_staging (
             percentage Float64,
             grade String,
             meaning String,
-            gpa Float64
+            gpa Float64,
+            -- Parent : could be month and semester
+            subjectParentName String,
+            subjectParentEvaluationId UUID,
+            subjectParentType String
+
         )
     ),
     
     -- Totals
     totalCredits Decimal(7,2),
-    totalGPA Decimal(5,2),
+    totalGPA Decimal(7,2),
     subjectCount UInt32,
     
     -- Additional Info
