@@ -1,4 +1,3 @@
-from yaml import load_all
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -6,7 +5,6 @@ from airflow.utils.dates import days_ago
 from pymongo import MongoClient
 import pandas as pd
 import requests
-import json
 import logging
 from datetime import datetime
 import uuid
