@@ -46,7 +46,7 @@ def extract_schools_from_postgres():
     """Extract data from PostgreSQL."""
     last_run_timestamp = Variable.get("etl_school_structure_last_run", default_var="1970-01-01T00:00:00")
 
-    postgres_hook = PostgresHook(postgres_conn_id='academic-local') #Postgress connection ID that need to be created in Clickhouse
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging') #Postgress connection ID that need to be created in Clickhouse
     sql = f'''
         SELECT "schoolId", "name", "nameNative", "code", "url", "email", "phone", "schoolType", "address",
         "status", "province", "country", "minPrice", "maxPrice", "isPublic" 
@@ -94,7 +94,7 @@ def extract_campuses_from_postgres():
     """Extract data from PostgreSQL."""
     last_run_timestamp = Variable.get("etl_school_structure_last_run", default_var="1970-01-01T00:00:00")
 
-    postgres_hook = PostgresHook(postgres_conn_id='academic-local') #Postgress connection ID that need to be created in Clickhouse
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging') #Postgress connection ID that need to be created in Clickhouse
     sql = f'''
         SELECT "schoolId", "campusId", "name", "nameNative", "code", "phone", "email",
         "address", "isHq", "archiveStatus", "status", "responsibleBy", "structureType"
@@ -141,7 +141,7 @@ def extract_group_structures_from_postgres():
     """Extract data from PostgreSQL."""
     last_run_timestamp = Variable.get("etl_school_structure_last_run", default_var="1970-01-01T00:00:00")
 
-    postgres_hook = PostgresHook(postgres_conn_id='academic-local') #Postgress connection ID that need to be created in Clickhouse
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging') #Postgress connection ID that need to be created in Clickhouse
     sql = f'''
         SELECT "schoolId", "campusId", "groupStructureId", "name", "nameNative", "code",
         "archiveStatus", "status", "responsibleBy", "structureType" 
@@ -188,7 +188,7 @@ def extract_structure_records_from_postgres():
     """Extract data from PostgreSQL."""
     last_run_timestamp = Variable.get("etl_school_structure_last_run", default_var="1970-01-01T00:00:00")
 
-    postgres_hook = PostgresHook(postgres_conn_id='academic-local') #Postgress connection ID that need to be created in Clickhouse
+    postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging') #Postgress connection ID that need to be created in Clickhouse
     sql = f'''
         SELECT "schoolId", "campusId", "groupStructureId", "structureRecordId", "name", "nameNative", "code",
         "enrollableCategory", "recordType", "tags", "isPromoted", "isFeatured", "isPublic", "isOpen", "startDate", "endDate",
