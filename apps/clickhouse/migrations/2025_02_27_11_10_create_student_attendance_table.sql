@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS mydatabase.student_attendance
+CREATE TABLE IF NOT EXISTS clickhouse.student_attendance
 (
     studentId UUID,
     attendanceDetails Array(Tuple(
