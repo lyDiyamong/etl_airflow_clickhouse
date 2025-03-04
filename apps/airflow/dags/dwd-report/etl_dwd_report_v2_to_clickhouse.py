@@ -37,18 +37,6 @@ def extract_data_from_postgres(**kwargs):
     postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging')
     connection = postgres_hook.get_conn()
 
-    # Get school data
-    with connection.cursor() as cursor:
-        sql_school = f'''
-            SELECT "schoolId", "name", "code", "schoolType"
-            FROM school
-            WHERE "schoolId" = '{SCHOOL_ID}'
-        '''
-        cursor.execute(sql_school)
-        school_data = cursor.fetchall()
-        school_columns = [desc[0] for desc in cursor.description]
-        school_records = pd.DataFrame(school_data, columns=school_columns).to_dict('records')
-
     # Get ALL structure records for the school first (not just those linked to students)
     with connection.cursor() as cursor:
         sql_all_structures = f'''
@@ -222,7 +210,7 @@ def load_data_to_clickhouse(**kwargs):
         formatted_rows.append(f"({','.join(formatted_values)})")
 
     # Construct the query
-    query = f'INSERT INTO clickhouse.dwd_report_test ({",".join(table_keys)}) VALUES '
+    query = f'INSERT INTO clickhouse.dwd_report ({",".join(table_keys)}) VALUES '
     query += ",".join(formatted_rows)
     
     # Send the query using requests
