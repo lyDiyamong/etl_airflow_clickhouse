@@ -37,57 +37,9 @@ def extract_data_from_postgres(**kwargs):
     postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging')
     connection = postgres_hook.get_conn()
 
-    # Get structure data
+    # Get ALL structure records for the school first (not just those linked to students)
     with connection.cursor() as cursor:
-        sql_school = f'''
-            SELECT "schoolId", "name", "code", "schoolType"
-            FROM school
-            WHERE "schoolId" = '0170ebdf-f7b9-4e6c-b803-2c1565677699'
-        '''
-        logger.info(f"Student sql: {sql_school}")
-        cursor.execute(sql_school)
-        school_data = cursor.fetchall()
-        school_columns = [desc[0] for desc in cursor.description]
-        school_records = pd.DataFrame(school_data, columns=school_columns).to_dict('records')
-
-    # Get student data
-    
-    with connection.cursor() as cursor:
-        sql_student = f'''
-            SELECT 
-                subquery."parentRecordId",
-                subquery."gender",
-                subquery."role",
-                SUM(subquery.student_count) AS "totalCount"
-            FROM (
-                -- First, count students per structure record, grouped by gender and role
-                SELECT 
-                    stu."gender",
-                    stu.profile->>'{PROFILE_KEY}' AS role,
-                    sr."parentRecordId",
-                    COUNT(*) AS student_count
-                FROM student AS stu
-                JOIN structure_record AS sr
-                ON stu."structureRecordId" = sr."structureRecordId"
-                WHERE stu."schoolId" = '{SCHOOL_ID}'
-                GROUP BY stu."gender", role, sr."parentRecordId", sr."structureRecordId"
-            ) AS subquery
-            GROUP BY subquery."parentRecordId", subquery."gender", subquery."role";
-        '''
-        logger.info(f"Student sql: {sql_student}")
-        cursor.execute(sql_student)
-        student_data = cursor.fetchall()
-        student_columns = [desc[0] for desc in cursor.description]
-        student_records = pd.DataFrame(student_data, columns=student_columns).to_dict('records')
-    logger.info(f'Student records {student_records}')
-    event_recordIds = set(student.get("parentRecordId") for student in student_records)
-    cleaned_parent_ids = {eid for eid in event_recordIds if eid is not None}
-    logger.info(f"Clean {cleaned_parent_ids}")
-
-    logger.info(f"event Record Ids {event_recordIds}")
-    # Get structure data
-    with connection.cursor() as cursor:
-        sql_structure = f'''
+        sql_all_structures = f'''
             SELECT 
                 sr."structureRecordId", 
                 sr."name", 
@@ -98,64 +50,111 @@ def extract_data_from_postgres(**kwargs):
             FROM structure_record AS sr
             JOIN school AS s
             ON sr."schoolId" = s."schoolId"
-            WHERE sr."structureRecordId" IN ({", ".join("'" + eid + "'" for eid in cleaned_parent_ids)});
+            WHERE sr."schoolId" = '{SCHOOL_ID}'
         '''
-        logger.info(f"Student sql: {sql_structure}")
-        cursor.execute(sql_structure)
-        structure_data = cursor.fetchall()
+        cursor.execute(sql_all_structures)
+        all_structure_data = cursor.fetchall()
         structure_columns = [desc[0] for desc in cursor.description]
-        structure_record_records = pd.DataFrame(structure_data, columns=structure_columns).to_dict('records')
+        all_structure_records = pd.DataFrame(all_structure_data, columns=structure_columns).to_dict('records')
+    
+    # Get student data
+    with connection.cursor() as cursor:
+        sql_student = f'''
+        SELECT 
+            parent_code,
+            "gender",
+            "role",
+            SUM(student_count) AS "totalCount"
+        FROM (
+            -- Inner query (updated to handle students without structureRecordId)
+            SELECT 
+                COALESCE(parent."code", child."code", 'No Structure') AS parent_code,
+                stu."gender",
+                stu.profile->>'0f161c83-9ffd-419a-a448-83a44346d4b3' AS role,
+                COUNT(*) AS student_count
+            FROM student AS stu
+            LEFT JOIN structure_record AS child
+                ON stu."structureRecordId" = child."structureRecordId"
+            LEFT JOIN structure_record AS parent
+                ON child."parentRecordId" = parent."structureRecordId"
+            WHERE stu."schoolId" = '0170ebdf-f7b9-4e6c-b803-2c1565677699'
+            GROUP BY COALESCE(parent."code", child."code", 'No Structure'), stu."gender", role
+        ) subquery
+        GROUP BY parent_code, "gender", "role";
+        '''
+        cursor.execute(sql_student)
+        student_data = cursor.fetchall()
+        student_columns = [desc[0] for desc in cursor.description]
+        student_records = pd.DataFrame(student_data, columns=student_columns).to_dict('records')
+
     connection.close()
-    logger.info(f'strucuture record {structure_record_records}')
-    # Pass transformed data to the next task
-    kwargs['ti'].xcom_push(key='structure_records', value=structure_record_records)
+    
+    # Pass ALL structure records, not just those linked to students
+    kwargs['ti'].xcom_push(key='all_structure_records', value=all_structure_records)
     kwargs['ti'].xcom_push(key="student_groupby_events", value=student_records)
 
 def transform_data(**kwargs):
     ti = kwargs['ti']
-    structure_records = ti.xcom_pull(key="structure_records", task_ids='extract_data_from_postgres')
+    all_structure_records = ti.xcom_pull(key="all_structure_records", task_ids='extract_data_from_postgres')
     student_groupby_records = ti.xcom_pull(key="student_groupby_events", task_ids='extract_data_from_postgres')
+
+    # Define your mapping from parent's code to event category names.
+    category_mapping = {
+        SOFT_SKILLS_CODE: "Soft Skills Event",
+        HARD_SKILLS_CODE: "Hard Skills Event",
+        NETWORKING_CODE: "Networking Event",
+        SOCIAL_EVENT_CODE: "Social Event",
+        MENTORING_CODE: "Mentoring Session"
+    }
 
     # Initialize event categories with default values
     event_categories = [
         "Soft Skills Event", "Hard Skills Event", "Networking Event", "Social Event", "Mentoring Session", "Others"
     ]
     categories = {event: {"student": {"male": 0, "female": 0, "other": 0, "total": 0},
-                           "professional": {"male": 0, "female": 0, "other": 0, "total": 0},
-                           "other": {"male": 0, "female": 0, "other": 0, "total": 0},
-                           "event_count": 0} for event in event_categories}
+                      "professional": {"male": 0, "female": 0, "other": 0, "total": 0},
+                      "other": {"male": 0, "female": 0, "other": 0, "total": 0},
+                      "event_count": 0} for event in event_categories}
 
-    # Process each structure record
-    for structure in structure_records:
-        event_code = structure.get("code", "").strip()
-        event_name_raw = structure.get("name", "").strip()
+    # First, update the event_count for each event using our aggregated counts
+    for structure in all_structure_records:
+        # Only consider top-level events
+        if not structure.get("parentRecordId"):
+            parent_code = structure.get("code", "").strip()
+            category = category_mapping.get(parent_code, "Others")
+            categories[category]["event_count"] += 1
 
-        category_mapping = {
-            SOFT_SKILLS_CODE: "Soft Skills Event",
-            HARD_SKILLS_CODE: "Hard Skills Event",
-            NETWORKING_CODE: "Networking Event",
-            SOCIAL_EVENT_CODE: "Social Event",
-            MENTORING_CODE : "Mentoring Event"
-        }
-        category = category_mapping.get(event_code, category_mapping.get(event_name_raw, "Others"))
+    # Now process student counts using the parent_code from the SQL result.
+    for student in student_groupby_records:
+        # student now has "parent_code" (instead of parentRecordId)
+        parent_code = student.get("parent_code")
         
-        categories[category]["event_count"] += 1
-        event_id = structure["structureRecordId"]
+        # Debugging: Log the parent_code
+        logger.debug(f"Processing student with parent_code: {parent_code}")
         
-        for student in student_groupby_records:
-            if student["parentRecordId"] in [event_id, None]:
-                role, gender, count = student['role'], student["gender"], int(student["totalCount"])
-                
-                role_key = "student" if role == "student-សិស្ស-និស្សិត" else \
-                           "professional" if role == "professional-worker-អ្នកធ្វើការ" else "other"
-                
-                gender_key = "male" if gender == "male-ប្រុស" else \
-                             "female" if gender == "female-ស្រី" else "other"
-                
-                categories[category][role_key][gender_key] += count
-                categories[category][role_key]["total"] += count
+        # Map the parent's code to an event category.
+        category = category_mapping.get(parent_code, "Others")
+        
+        # Debugging: Log the category
+        if category == "Others":
+            logger.warning(f"Parent code '{parent_code}' not found in category mapping. Defaulting to 'Others'.")
+
+        role = student['role']
+        gender = student["gender"]
+        count = int(student["totalCount"])
+        
+        role_key = ("student" if role == "student-សិស្ស-និស្សិត"
+                    else "professional" if role == "professional-worker-អ្នកធ្វើការ"
+                    else "other")
+        gender_key = ("male" if gender == "male-ប្រុស"
+                    else "female" if gender == "female-ស្រី"
+                    else "other")
+        
+        categories[category][role_key][gender_key] += count
+        categories[category][role_key]["total"] += count
+
     
-    school_name = structure_records[0]["schoolName"] if structure_records else "Digital Workforce Development"
+    school_name = all_structure_records[0]["schoolName"] if all_structure_records else "Digital Workforce Development"
     transformed_records = []
 
     for category_name, counts in categories.items():
@@ -211,7 +210,7 @@ def load_data_to_clickhouse(**kwargs):
         formatted_rows.append(f"({','.join(formatted_values)})")
 
     # Construct the query
-    query = f'INSERT INTO clickhouse.dwd_report_test ({",".join(table_keys)}) VALUES '
+    query = f'INSERT INTO clickhouse.dwd_report ({",".join(table_keys)}) VALUES '
     query += ",".join(formatted_rows)
     
     # Send the query using requests
@@ -228,16 +227,14 @@ def load_data_to_clickhouse(**kwargs):
             logger.error(error_msg)
             raise Exception(error_msg)
         
-        logger.info(f"Successfully loaded {len(data)} records into dwd_report table")
+        logger.info(f"Successfully loaded {len(data)} records into dwd_report_test table")
     except Exception as e:
         logger.error(f"Error loading data to ClickHouse: {str(e)}")
         raise
 
-
-
 # Define the DAG
 dag = DAG(
-    'dwd_report_transcript_etl',
+    'dwd_report_v3_etl',
     default_args=default_args,
     description='Extract dwd data, transform it into dwd report, and load into ClickHouse',
     schedule_interval='@daily',
