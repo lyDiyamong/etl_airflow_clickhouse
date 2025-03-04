@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS clickhouse.dwd_report
+CREATE TABLE IF NOT EXISTS clickhouse.dwd_report_test
 (
     schoolId UUID,
     schoolName String,
