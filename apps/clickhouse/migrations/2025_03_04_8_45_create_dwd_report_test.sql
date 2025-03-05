@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS clickhouse.dwd_report_test
+CREATE TABLE IF NOT EXISTS clickhouse.dwd_report_v4
 (
     schoolId UUID,
     schoolName String,
@@ -21,8 +21,14 @@ CREATE TABLE IF NOT EXISTS clickhouse.dwd_report_test
         other UInt64,
         total UInt64
     ),
-    eventCount UInt64
-)
-ENGINE = MergeTree()
+    eventCountDetails Array(
+        Tuple(
+            campusName String,
+            campusId UUID,
+            eventCount UInt64
+        )
+    ),
+    updatedAt DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updatedAt)
 ORDER BY (schoolId, eventName)
 -- INDEX idx_schoolName (schoolName) TYPE minmax GRANULARITY 1
