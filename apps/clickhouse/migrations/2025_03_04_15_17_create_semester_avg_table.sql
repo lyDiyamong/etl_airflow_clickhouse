@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS class_yearly_scores (
     -- Example: (68.5, 80, 74.25) = (Semester Average, Exam Score, Final Score)
     semesterDetails Array( 
         Tuple(
-            semesterId UUID
+            semesterId UUID,
             semesterPeriod String,
             averageScore Decimal(5,2),
             examScore Decimal(5,2),
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS class_yearly_scores (
     reExam_score Nullable(Decimal(5,2)),
 
     -- Timestamp
-    created_at DateTime DEFAULT now()
-) ENGINE = MergeTree()
-ORDER BY (class_id, subject);
+    created_at DateTime DEFAULT now(),
+    updatedAt DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updatedAt)
+ORDER BY (classId, subjectName);
