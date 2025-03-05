@@ -48,6 +48,8 @@ def extract_data_from_postgres(**kwargs):
                 parent."structureRecordId" AS parent_id,
                 parent."name" AS parent_name,
                 parent."code" AS parent_code,
+                gs."groupStructureId",
+                gs."name" AS groupStructure_name,
                 COUNT(child."structureRecordId") AS structure_count,
                 cp."name" AS campus_name,
                 cp."campusId" AS campus_id,
@@ -60,9 +62,13 @@ def extract_data_from_postgres(**kwargs):
                 ON parent."campusId" = cp."campusId"
             JOIN school AS s
                 ON parent."schoolId" = s."schoolId"
+            LEFT JOIN group_structure AS gs
+                ON parent."groupStructureId" = gs."groupStructureId"
             WHERE parent."schoolId" = '{SCHOOL_ID}'
                 AND parent."parentRecordId" IS NULL  -- Only top-level structures
+                AND gs."name" = 'Events'  -- Filter for Events only
             GROUP BY parent."structureRecordId", parent."name", parent."code", 
+                     gs."groupStructureId", gs."name",
                      cp."name", cp."campusId", s."name", s."schoolId"
             ORDER BY parent."code";
         '''
@@ -71,7 +77,7 @@ def extract_data_from_postgres(**kwargs):
         structure_columns = [desc[0] for desc in cursor.description]
         all_structure_records = pd.DataFrame(all_structure_data, columns=structure_columns).to_dict('records')
     
-    # Get student data grouped by campus and parent code
+    # Get student data grouped by campus and parent code, filtered for Events
     with connection.cursor() as cursor:
         sql_student = f'''
         SELECT 
@@ -82,7 +88,7 @@ def extract_data_from_postgres(**kwargs):
             "role",
             SUM(student_count) AS "totalCount"
         FROM (
-            -- Inner query (updated to handle students without structureRecordId)
+            -- Inner query (filtered for Events)
             SELECT 
                 COALESCE(parent."code", child."code", 'No Structure') AS parent_code,
                 cp."campusId" AS campus_id,
