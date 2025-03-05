@@ -42,6 +42,8 @@ services:
       - ./apps/airflow/dags:/opt/airflow/dags
       - ./apps/airflow/logs:/opt/airflow/logs
       - ./apps/airflow/.env:/opt/airflow/.env
+      - ./apps/airflow/utilities:/opt/airflow/utilities
+
     ports:
       - "8081:8080"
       - "8793:8793" # Log server
@@ -65,28 +67,29 @@ services:
       - ./apps/airflow/dags:/opt/airflow/dags
       - ./apps/airflow/logs:/opt/airflow/logs
       - ./apps/airflow/.env:/opt/airflow/.env
+      - ./apps/airflow/utilities:/opt/airflow/utilities
     depends_on:
       - postgres
     command: ["bash", "-c", "airflow db init && airflow scheduler"]
-  metabase:
-    build:
-      context: "./apps/metabase"
-    image: sala-metabase:latest
-    container_name: metabase
-    ports:
-      - "3050:3000" # Metabase web UI
-    platform: linux/amd64
-    volumes:
-      - metabase-data:/metabase-data # Persist Metabase data
-    # environment:
-    #   - MB_DB_TYPE=clickhouse
-    #   - MB_DB_HOST=clickhouse-server
-    #   - MB_DB_PORT=9000
-    #   - MB_DB_USER=default
-    #   - MB_DB_PASSWORD=
-    #   - MB_DB_NAME=default
-    depends_on:
-      - clickhouse-server
+  # metabase:
+  #   build:
+  #     context: "./apps/metabase"
+  #   image: sala-metabase:latest
+  #   container_name: metabase
+  #   ports:
+  #     - "3050:3000" # Metabase web UI
+  #   platform: linux/amd64
+  #   volumes:
+  #     - metabase-data:/metabase-data # Persist Metabase data
+  #   # environment:
+  #   #   - MB_DB_TYPE=clickhouse
+  #   #   - MB_DB_HOST=clickhouse-server
+  #   #   - MB_DB_PORT=9000
+  #   #   - MB_DB_USER=default
+  #   #   - MB_DB_PASSWORD=
+  #   #   - MB_DB_NAME=default
+  #   depends_on:
+  #     - clickhouse-server
   mongodb:
     image: mongo:5.0
     container_name: mongodb
