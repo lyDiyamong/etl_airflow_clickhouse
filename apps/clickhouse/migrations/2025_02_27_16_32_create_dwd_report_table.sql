@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS clickhouse.dwd_report
         total UInt64
     ),
     eventCount UInt64
-)
-ENGINE = MergeTree()
+    updatedAt DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updatedAt)
 ORDER BY (schoolId, eventName)
 -- INDEX idx_schoolName (schoolName) TYPE minmax GRANULARITY 1
