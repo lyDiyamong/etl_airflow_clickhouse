@@ -2,13 +2,11 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.dates import days_ago
-from pymongo import MongoClient
+from airflow.models import Variable
 import pandas as pd
 import requests
 import logging
-from datetime import datetime
-import uuid
-from collections import defaultdict
+# from utilities import update_etl_timestamp
 
 from dotenv import load_dotenv
 import os
@@ -33,7 +31,12 @@ SCHOOL_ID = "0170ebdf-f7b9-4e6c-b803-2c1565677699"
 # Define role in profile json 
 PROFILE_KEY='0f161c83-9ffd-419a-a448-83a44346d4b3'
 
+# etl_dwd_report_last_run = update_etl_timestamp("etl_dwd_report_last_run")
+
 def extract_data_from_postgres(**kwargs):
+
+    # last_run_timestamp = Variable.get("etl_dwd_report_last_run", default_var="1970-01-01T00:00:00")
+
     postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging')
     connection = postgres_hook.get_conn()
 
@@ -50,8 +53,11 @@ def extract_data_from_postgres(**kwargs):
             FROM structure_record AS sr
             JOIN school AS s
             ON sr."schoolId" = s."schoolId"
-            WHERE sr."schoolId" = '{SCHOOL_ID}'
+            WHERE sr."schoolId" = '{SCHOOL_ID}' AND
+           
+            ORDER BY "updatedAt" DESC;
         '''
+        #  "updatedAt" > '{last_run_timestamp}'
         cursor.execute(sql_all_structures)
         all_structure_data = cursor.fetchall()
         structure_columns = [desc[0] for desc in cursor.description]
@@ -70,18 +76,22 @@ def extract_data_from_postgres(**kwargs):
             SELECT 
                 COALESCE(parent."code", child."code", 'No Structure') AS parent_code,
                 stu."gender",
-                stu.profile->>'0f161c83-9ffd-419a-a448-83a44346d4b3' AS role,
+                stu.profile->>'{PROFILE_KEY}' AS role,
                 COUNT(*) AS student_count
             FROM student AS stu
             LEFT JOIN structure_record AS child
                 ON stu."structureRecordId" = child."structureRecordId"
             LEFT JOIN structure_record AS parent
                 ON child."parentRecordId" = parent."structureRecordId"
-            WHERE stu."schoolId" = '0170ebdf-f7b9-4e6c-b803-2c1565677699'
+            WHERE stu."schoolId" = '{SCHOOL_ID}' 
+            
             GROUP BY COALESCE(parent."code", child."code", 'No Structure'), stu."gender", role
         ) subquery
-        GROUP BY parent_code, "gender", "role";
+        GROUP BY parent_code, "gender", "role"
+        ORDER BY parent_code, "gender", "role";
         '''
+
+        # AND stu."updatedAt" > '{last_run_timestamp}'
         cursor.execute(sql_student)
         student_data = cursor.fetchall()
         student_columns = [desc[0] for desc in cursor.description]
@@ -264,4 +274,12 @@ load_task = PythonOperator(
     dag=dag,
 )
 
-extract_data_task >> transfom_data_task >> load_task
+# Update ETL Timestamp
+# update_timestamp = PythonOperator(
+#     task_id='update_etl_timestamp',
+#     python_callable=etl_dwd_report_last_run,
+#     dag=dag,
+# )
+
+extract_data_task >> transfom_data_task >> load_task 
+# >> update_timestamp
