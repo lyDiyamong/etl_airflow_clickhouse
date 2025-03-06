@@ -394,7 +394,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
                 subject_parent_type = parent_eval.get('type', '')
                 
                 # Check if parent is month or semester and set accordingly
-                if subject_parent_type == 'month':
+                if subject_parent_type == 'month' or subject_parent_type == 'exam_columns':
                     month_name = subject_parent_name
                     month_evaluation_id = subject_parent_evaluation_id
                     
@@ -405,7 +405,8 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
                         if semester_eval.get('type') == 'semester':
                             semester_name = semester_eval.get('name', "")
                             semester_evaluation_id = semester_eval.get('evaluationId')
-                
+
+
                 elif subject_parent_type == 'semester':
                     semester_name = subject_parent_name
                     semester_evaluation_id = subject_parent_evaluation_id
@@ -480,7 +481,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             
             # Subject Details (array of tuples with parent info)
             'subjectDetails': subject_details,
-            
+
             # Totals
             'totalCredits': total_credits,
             'totalGPA': total_gpa,
