@@ -144,7 +144,7 @@ def extract_data_from_mongodb(**kwargs):
         "_id": 0, "name": 1, "description": 1, "sort": 1, "maxScore": 1, 
         "coe": 1, "type": 1, "parentId": 1, "schoolId": 1, "campusId": 1,
         "groupStructureId": 1, "structurePath": 1, "evaluationId": 1, "templateId": 1, 
-        "configGroupId": 1, "referenceId": 1, "createdAt": 1
+        "configGroupId": 1, "referenceId": 1, "createdAt": 1, "attendanceColumn": 1
     }))
     
     scores = list(db['scores'].find({}, {
@@ -221,6 +221,8 @@ def extract_data_from_postgres(**kwargs):
 
 def calculate_subject_scores(evaluations, scores, students, structure_records, subjects):
     """Transform raw data to calculate subject scores and aggregate them by student."""
+    
+
     
     # 1. Build dictionaries for quick lookup
     evaluations_by_id = {eval_rec['evaluationId']: eval_rec for eval_rec in evaluations}
@@ -384,6 +386,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
             month_evaluation_id = None
             semester_name = ""
             semester_evaluation_id = None
+            semester_start_date = None  # Initialize with a default value
             
             # First check direct parent
             parent_id = subject_eval.get('parentId')
@@ -404,6 +407,14 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
                         semester_eval = evaluations_by_id.get(month_parent_id, {})
                         if semester_eval.get('type') == 'semester':
                             semester_name = semester_eval.get('name', "")
+                            # Check if attendanceColumn exists and is a dictionary
+                            attendance_column = semester_eval.get('attendanceColumn')
+                            logger.info(f"semester eval: {semester_eval}")
+                            if attendance_column and isinstance(attendance_column, dict):
+                                semester_start_date = attendance_column.get('startDate', '')
+                                logger.info(f"Semester start date: {semester_start_date}")
+                            else:
+                                semester_start_date = ""
                             semester_evaluation_id = semester_eval.get('evaluationId')
 
 
@@ -432,7 +443,7 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
 
                 semester_name,                                       # semesterName
                 semester_evaluation_id,                               # semesterEvaluationId
-
+                semester_start_date,                                 # semesterStartDate
             )
             
             # Add to student's subject details, keyed by (student_id, structure_record_id)
@@ -540,7 +551,11 @@ def load_data_to_clickhouse(**kwargs):
         if value is None:
             return "NULL"  # Ensure None is converted to NULL
 
-        if key == 'dob':
+        # Handle date fields - convert empty strings to NULL
+        if key in ['dob', 'semester_start_date'] and (value == "" or value is None):
+            return "NULL"
+
+        if key == 'dob' and value:
             # Use '0000-00-00 00:00:00' for missing DateTime values
             return f"'{value}'"
 
@@ -549,7 +564,7 @@ def load_data_to_clickhouse(**kwargs):
             for tup in value:
                 elements = []
                 for i, elem in enumerate(tup):
-                    if elem is None:  # Convert None inside tuples as well
+                    if elem is None or (i == 18 and elem == ""):  # Handle empty date at index 18 (semesterStartDate)
                         elements.append("NULL")
                     elif i == 0:  # UUID
                         elements.append(f"'{elem}'")

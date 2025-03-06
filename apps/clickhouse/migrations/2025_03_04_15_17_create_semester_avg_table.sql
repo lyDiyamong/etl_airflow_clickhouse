@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS class_yearly_scores (
         Tuple(
             semesterId UUID, -- evaluation parent = type = semester
             semesterPeriod String, 
+            semesterStartDate Nullable(Date),
             averageScore Decimal(5,2),
             examScore Decimal(5,2),
             finalScore Decimal(5,2)
