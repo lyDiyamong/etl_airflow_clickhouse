@@ -206,13 +206,11 @@ def transform_to_class_scores(**kwargs):
             # Find the semester this month belongs to (use the first entry's semester)
             semester_name = scores[0]['semester_name'] if scores else ''
             semester_id = scores[0]['semester_eval_id'] if scores else None
-            semester_start_date = scores[0]['semester_start_date'] if scores else None
             month_details.append((
                 month_name, 
                 round(avg_score, 2), 
                 semester_name, 
-                semester_id,
-                semester_start_date
+                semester_id
             ))
         
         # Group data by semester for semester calculations
