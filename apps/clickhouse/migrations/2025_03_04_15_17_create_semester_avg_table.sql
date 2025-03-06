@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS class_yearly_scores (
     monthDetails Array(
         Tuple(
             monthName String,
-            monthScore Decimal(5,2),
-            monthParent String,
+            monthScore Decimal(5,2), -- Score AVG of the month
+            monthParent String, -- Name of the semester
             monthParentId UUID
         )
     ),          
@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS class_yearly_scores (
     -- Example: (68.5, 80, 74.25) = (Semester Average, Exam Score, Final Score)
     semesterDetails Array( 
         Tuple(
-            semesterId UUID,
-            semesterPeriod String,
+            semesterId UUID, -- evaluation parent = type = semester
+            semesterPeriod String, 
             averageScore Decimal(5,2),
             examScore Decimal(5,2),
             finalScore Decimal(5,2)
