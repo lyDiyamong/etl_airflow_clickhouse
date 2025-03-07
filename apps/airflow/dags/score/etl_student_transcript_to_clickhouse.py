@@ -2,19 +2,27 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.dates import days_ago
+from airflow.models import Variable
 from pymongo import MongoClient
 import pandas as pd
-import requests
 import logging
 from datetime import datetime
-import uuid
 from collections import defaultdict
-
-from dotenv import load_dotenv
+import sys
 import os
+from dotenv import load_dotenv
+
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from utilities.clickhouse_utils import execute_clickhouse_query, format_value, optimize_table
+from utilities.update_etl_timestamp import update_etl_timestamp
+
+
 # Load environment variables from the .env file
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+student_transcript_update_etl_timestamp = update_etl_timestamp("etl_student_transcript_last_run")
 
 default_args = {
     'owner': 'airflow',
@@ -135,94 +143,203 @@ def assign_ranks(transcript_records):
 # Extracting data from MongoDB
 def extract_data_from_mongodb(**kwargs):
     """Extract evaluations and score data from MongoDB."""
+    # Get the last ETL run timestamp
+    last_run_timestamp = Variable.get("etl_student_transcript_last_run", default_var="1970-01-01T00:00:00")
+    
+    # Convert the ISO timestamp string to a datetime object for MongoDB query
+    try:
+        last_run_date = datetime.fromisoformat(last_run_timestamp.replace('Z', '+00:00'))
+    except ValueError:
+        # Handle older timestamp formats
+        try:
+            last_run_date = datetime.strptime(last_run_timestamp, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            logger.warning(f"Could not parse timestamp: {last_run_timestamp}, using epoch start")
+            last_run_date = datetime(1970, 1, 1)
+    
+    logger.info(f"Extracting MongoDB data updated after: {last_run_date}")
+    
     # Connect to MongoDB
     client = MongoClient(os.getenv("MONGODB_URL"))
     db = client[f'{os.getenv("DB_EVALUATION")}-{os.getenv("ENVIRONMENT")}']
     
-    # Get all evaluations
-    evaluations = list(db['evaluations'].find({}, {
-        "_id": 0, "name": 1, "description": 1, "sort": 1, "maxScore": 1, 
-        "coe": 1, "type": 1, "parentId": 1, "schoolId": 1, "campusId": 1,
-        "groupStructureId": 1, "structurePath": 1, "evaluationId": 1, "templateId": 1, 
-        "configGroupId": 1, "referenceId": 1, "createdAt": 1, "attendanceColumn": 1
-    }))
+    # Get evaluations updated after the last run
+    evaluations = list(db['evaluations'].find(
+        {
+            # "$or": [
+            #     {"updatedAt": {"$gt": f"{last_run_date}"}},
+            #     {"createdAt": {"$gt": f"{last_run_date}"}}
+            # ]
+        }, 
+        {
+            "_id": 0, "name": 1, "description": 1, "sort": 1, "maxScore": 1, 
+            "coe": 1, "type": 1, "parentId": 1, "schoolId": 1, "campusId": 1,
+            "groupStructureId": 1, "structurePath": 1, "evaluationId": 1, "templateId": 1, 
+            "configGroupId": 1, "referenceId": 1, "createdAt": 1, "attendanceColumn": 1,
+            "updatedAt": 1
+        }
+    ))
     
-    scores = list(db['scores'].find({}, {
-        "_id": 0, "score": 1, "evaluationId": 1, "studentId": 1, "idCard": 1,
-        "scorerId": 1, "markedAt": 1, "structurePath": 1
-    }))
+    # Get scores updated after the last run
+    scores = list(db['scores'].find(
+        {
+            # "markedAt": {"$gt": f"{last_run_date}"}
+        },
+        {
+            "_id": 0, "score": 1, "evaluationId": 1, "studentId": 1, "idCard": 1,
+            "scorerId": 1, "markedAt": 1, "structurePath": 1
+        }
+    ))
 
-    # Pass data to the next task
+    logger.info(f"Extracted {scores} scores from MongoDB")
+    
+    # If no updated data is found, check if we need to get all evaluation IDs for the scores
+    if scores and not evaluations:
+        # Get all evaluation IDs from the scores
+        evaluation_ids = list(set(score.get('evaluationId') for score in scores if score.get('evaluationId')))
+        
+        if evaluation_ids:
+            # Fetch the evaluations for these scores even if they weren't updated
+            additional_evaluations = list(db['evaluations'].find(
+                {"evaluationId": {"$in": evaluation_ids}},
+                {
+                    "_id": 0, "name": 1, "description": 1, "sort": 1, "maxScore": 1, 
+                    "coe": 1, "type": 1, "parentId": 1, "schoolId": 1, "campusId": 1,
+                    "groupStructureId": 1, "structurePath": 1, "evaluationId": 1, "templateId": 1, 
+                    "configGroupId": 1, "referenceId": 1, "createdAt": 1, "attendanceColumn": 1,
+                    "updatedAt": 1
+                }
+            ))
+            evaluations.extend(additional_evaluations)
+    
+    logger.info(f"Extracted {len(evaluations)} evaluations and {len(scores)} scores from MongoDB")
+    
+    # Close MongoDB connection
+    client.close()
+    
+    # Push the extracted data to XCom
     kwargs['ti'].xcom_push(key='evaluations', value=evaluations)
     kwargs['ti'].xcom_push(key='scores', value=scores)
-
-    client.close()
+    
+    return {
+        'evaluations_count': len(evaluations),
+        'scores_count': len(scores)
+    }
 
 
 
 # Extracting data from PostgreSQL
 def extract_data_from_postgres(**kwargs):
+    """Extract related data from PostgreSQL."""
+    # Get data from the previous task
+    evaluations = kwargs['ti'].xcom_pull(key='evaluations', task_ids='extract_data_from_mongodb')
     scores = kwargs['ti'].xcom_pull(key='scores', task_ids='extract_data_from_mongodb')
     
+    last_run_timestamp = Variable.get("etl_student_transcript_last_run", default_var="1970-01-01T00:00:00")
     # Extract the IDs from the score records
     structure_ids = set(score['structurePath'].split("#")[1] for score in scores if score.get('structurePath'))
-    cleaned_structure_ids = {sid for sid in structure_ids if sid != "undefined"}
     student_ids = set(score['studentId'] for score in scores if score.get('studentId'))
-
+    
+    # Check if we have any data to process
+    if not structure_ids or not student_ids:
+        logger.warning("No structure IDs or student IDs found in scores. Skipping PostgreSQL extraction.")
+        # Return empty data structures
+        kwargs['ti'].xcom_push(key='structure_records', value=[])
+        kwargs['ti'].xcom_push(key='student_records', value=[])
+        kwargs['ti'].xcom_push(key='subject_records', value=[])
+        return {
+            'structure_count': 0,
+            'student_count': 0,
+            'subject_count': 0
+        }
+    
+    # Clean up the IDs (remove None, empty strings, etc.)
+    cleaned_structure_ids = [sid for sid in structure_ids if sid != "undefined"]
+    cleaned_student_ids = [sid for sid in student_ids if sid]
+    
+    # Check again after cleaning
+    if not cleaned_structure_ids or not cleaned_student_ids:
+        logger.warning("No valid structure IDs or student IDs after cleaning. Skipping PostgreSQL extraction.")
+        kwargs['ti'].xcom_push(key='structure_records', value=[])
+        kwargs['ti'].xcom_push(key='student_records', value=[])
+        kwargs['ti'].xcom_push(key='subject_records', value=[])
+        return {
+            'structure_count': 0,
+            'student_count': 0,
+            'subject_count': 0
+        }
+    
+    # Connect to PostgreSQL
     postgres_hook = PostgresHook(postgres_conn_id='academic-local-staging')
     connection = postgres_hook.get_conn()
-
-    logger.info(f'Structure record ids {structure_ids}')
-
-    # Get structure data
-    with connection.cursor() as cursor:
-        sql_structure = f'''
-            SELECT "structureRecordId", "name", "groupStructureId"
-            FROM structure_record
-            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)})
-        '''
-        logger.info(f"Student sql: {sql_structure}")
-        cursor.execute(sql_structure)
-        structure_data = cursor.fetchall()
-        structure_columns = [desc[0] for desc in cursor.description]
-        structure_record_records = pd.DataFrame(structure_data, columns=structure_columns).to_dict('records')
-
-    # Get student data
-    with connection.cursor() as cursor:
-        sql_student = f'''
-            SELECT "studentId", "firstName", "lastName", "firstNameNative", "lastNameNative", "dob", "gender", "campusId", "structureRecordId", "idCard"
-            FROM student
-            WHERE "studentId" IN ({", ".join("'" + stid + "'" for stid in student_ids)})
-        '''
-        
-        cursor.execute(sql_student)
-        student_data = cursor.fetchall()
-        student_columns = [desc[0] for desc in cursor.description]
-        student_records = pd.DataFrame(student_data, columns=student_columns).to_dict('records')
-
-    # Get subject data
-    with connection.cursor() as cursor:
-        sql_subject = f'''
-            SELECT "subjectId", "name", "nameNative", "credit", "code", "structureRecordId", "coe"
-            FROM subject
-            WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)})
-        '''
-        cursor.execute(sql_subject)
-        subject_data = cursor.fetchall()
-        subject_columns = [desc[0] for desc in cursor.description]
-        subject_records = pd.DataFrame(subject_data, columns=subject_columns).to_dict('records')
     
-    connection.close()
-
-    # Push the extracted data to XCom
+    # Get structure data
+    structure_record_records = []
+    student_records = []
+    subject_records = []
+    
+    try:
+        with connection.cursor() as cursor:
+            sql_structure = f'''
+                SELECT "structureRecordId", "name", "groupStructureId"
+                FROM structure_record
+                WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)})
+                --AND "updatedAt" > '{last_run_timestamp}' 
+            '''
+            logger.info(f"Structure SQL: {sql_structure}")
+            cursor.execute(sql_structure)
+            structure_data = cursor.fetchall()
+            structure_columns = [desc[0] for desc in cursor.description]
+            structure_record_records = pd.DataFrame(structure_data, columns=structure_columns).to_dict('records')
+        
+        # Get student data
+        with connection.cursor() as cursor:
+            sql_student = f'''
+                SELECT "studentId", "firstName", "lastName", "firstNameNative", "lastNameNative", "dob", "gender", "campusId", "structureRecordId", "idCard"
+                FROM student
+                WHERE "studentId" IN ({", ".join("'" + stid + "'" for stid in cleaned_student_ids)}) 
+                --AND "updatedAt" > '{last_run_timestamp}'  
+            '''
+            logger.info(f"Student SQL: {sql_student}")
+            cursor.execute(sql_student)
+            student_data = cursor.fetchall()
+            student_columns = [desc[0] for desc in cursor.description]
+            student_records = pd.DataFrame(student_data, columns=student_columns).to_dict('records')
+        
+        # Get subject data
+        with connection.cursor() as cursor:
+            sql_subject = f'''
+                SELECT "subjectId", "name", "nameNative", "credit", "code", "structureRecordId", "coe"
+                FROM subject
+                WHERE "structureRecordId" IN ({", ".join("'" + sid + "'" for sid in cleaned_structure_ids)}) 
+                --AND "updatedAt" > '{last_run_timestamp}' 
+            '''
+            logger.info(f"Subject SQL: {sql_subject}")
+            cursor.execute(sql_subject)
+            subject_data = cursor.fetchall()
+            subject_columns = [desc[0] for desc in cursor.description]
+            subject_records = pd.DataFrame(subject_data, columns=subject_columns).to_dict('records')
+    except Exception as e:
+        logger.error(f"Error extracting data from PostgreSQL: {str(e)}")
+        raise
+    finally:
+        connection.close()
+    
+    # Pass data to the next task
     kwargs['ti'].xcom_push(key='structure_records', value=structure_record_records)
-    kwargs['ti'].xcom_push(key='students', value=student_records)
-    kwargs['ti'].xcom_push(key='subjects', value=subject_records)
+    kwargs['ti'].xcom_push(key='student_records', value=student_records)
+    kwargs['ti'].xcom_push(key='subject_records', value=subject_records)
+    
+    logger.info(f"Extracted {len(structure_record_records)} structure records, {len(student_records)} student records, and {len(subject_records)} subject records from PostgreSQL")
+    
+    return {
+        'structure_count': len(structure_record_records),
+        'student_count': len(student_records),
+        'subject_count': len(subject_records)
+    }
 
 def calculate_subject_scores(evaluations, scores, students, structure_records, subjects):
     """Transform raw data to calculate subject scores and aggregate them by student."""
-    
-
     
     # 1. Build dictionaries for quick lookup
     evaluations_by_id = {eval_rec['evaluationId']: eval_rec for eval_rec in evaluations}
@@ -409,10 +526,8 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
                             semester_name = semester_eval.get('name', "")
                             # Check if attendanceColumn exists and is a dictionary
                             attendance_column = semester_eval.get('attendanceColumn')
-                            logger.info(f"semester eval: {semester_eval}")
                             if attendance_column and isinstance(attendance_column, dict):
                                 semester_start_date = attendance_column.get('startDate', '')
-                                logger.info(f"Semester start date: {semester_start_date}")
                             else:
                                 semester_start_date = ""
                             semester_evaluation_id = semester_eval.get('evaluationId')
@@ -508,9 +623,6 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
         
         transcript_records.append(record)
     new_transcript_records = assign_ranks(transcript_records)
-    
-    logger.info(f'New transcript_record {new_transcript_records[500:510]}')
-    logger.info(f'Old transcript_record {transcript_records[500:510]}')
 
     logger.info(f'transcript_record {len(new_transcript_records)}')
 
@@ -519,21 +631,27 @@ def calculate_subject_scores(evaluations, scores, students, structure_records, s
 
 
 def transform_data(**kwargs):
-    """Transform data to calculate student transcripts"""
-    
-    # Retrieve data from XCom
+    """Transform the extracted data into the required format for ClickHouse."""
+    # Get data from the previous tasks
     evaluations = kwargs['ti'].xcom_pull(key='evaluations', task_ids='extract_data_from_mongodb')
     scores = kwargs['ti'].xcom_pull(key='scores', task_ids='extract_data_from_mongodb')
-    students = kwargs['ti'].xcom_pull(key='students', task_ids='extract_data_from_postgres')
     structure_records = kwargs['ti'].xcom_pull(key='structure_records', task_ids='extract_data_from_postgres')
-    subjects = kwargs['ti'].xcom_pull(key='subjects', task_ids='extract_data_from_postgres')
-
-    # Transform the data
-    transformed_data = calculate_subject_scores(evaluations, scores, students, structure_records, subjects)
-    logger.info(f"Generated {len(transformed_data)} transcript records")
+    student_records = kwargs['ti'].xcom_pull(key='student_records', task_ids='extract_data_from_postgres')
+    subject_records = kwargs['ti'].xcom_pull(key='subject_records', task_ids='extract_data_from_postgres')
     
-    # Pass transformed data to the next task
+    # Check if we have data to transform
+    if not scores or not evaluations:
+        logger.warning("No scores or evaluations data to transform")
+        kwargs['ti'].xcom_push(key='transformed_data', value=[])
+        return []
+    
+    # Transform the data
+    transformed_data = calculate_subject_scores(evaluations, scores, student_records, structure_records, subject_records)
+    
+    # Pass the transformed data to the next task
     kwargs['ti'].xcom_push(key='transformed_data', value=transformed_data)
+    
+    return transformed_data
 
 def load_data_to_clickhouse(**kwargs):
     """Load data into ClickHouse."""
@@ -541,77 +659,80 @@ def load_data_to_clickhouse(**kwargs):
     
     if not data:
         logger.warning("No data to load into ClickHouse")
-        return
+        return "No data to load"
     
-    # Prepare the ClickHouse HTTP endpoint and query
-    clickhouse_url = f'{os.getenv("CLICKHOUSE_HOST")}:{os.getenv("CLICKHOUSE_PORT")}'
-    
-    def format_value(value, key):
-        """Format values for ClickHouse with proper type handling."""
-        if value is None:
-            return "NULL"  # Ensure None is converted to NULL
-
-        # Handle date fields - convert empty strings to NULL
-        if key in ['dob', 'semester_start_date'] and (value == "" or value is None):
-            return "NULL"
-
-        if key == 'dob' and value:
-            # Use '0000-00-00 00:00:00' for missing DateTime values
-            return f"'{value}'"
-
-        if key == 'subjectDetails':
-            formatted_tuples = []
-            for tup in value:
-                elements = []
-                for i, elem in enumerate(tup):
-                    if elem is None or (i == 18 and elem == ""):  # Handle empty date at index 18 (semesterStartDate)
-                        elements.append("NULL")
-                    elif i == 0:  # UUID
-                        elements.append(f"'{elem}'")
-                    elif isinstance(elem, str):
-                        escaped = elem.replace("'", "''")
-                        elements.append(f"'{escaped}'")
-                    else:
-                        elements.append(str(elem))
-                formatted_tuples.append(f"({','.join(elements)})")
-            
-            return f"[{','.join(formatted_tuples)}]"
-
-        elif isinstance(value, str):
-            escaped_value = value.replace("'", "''")
-            return f"'{escaped_value}'"
-        
-        return str(value)
-
-    # Build the formatted row values
+    # Format rows with proper type handling
     formatted_rows = []
     table_keys = list(data[0].keys())
 
     for row in data:
-        formatted_values = [format_value(row[key], key) for key in table_keys]
+        formatted_values = []
+        for key in table_keys:
+            value = row[key]
+            
+            # Special handling for subjectDetails array of tuples
+            if key == 'subjectDetails':
+                formatted_tuples = []
+                for tup in value:
+                    elements = []
+                    for i, elem in enumerate(tup):
+                        if elem is None or (i == 18 and elem == ""):  # Handle empty date at index 18 (semesterStartDate)
+                            elements.append("NULL")
+                        elif i == 0:  # UUID
+                            elements.append(f"'{elem}'")
+                        elif isinstance(elem, str):
+                            escaped = elem.replace("'", "''")
+                            elements.append(f"'{escaped}'")
+                        else:
+                            elements.append(str(elem))
+                    formatted_tuples.append(f"({','.join(elements)})")
+                
+                formatted_values.append(f"[{','.join(formatted_tuples)}]")
+            else:
+                # Handle date fields
+                if key in ['dob', 'semester_start_date'] and (value == "" or value is None):
+                    formatted_values.append("NULL")
+                elif key == 'dob' and value:
+                    formatted_values.append(f"'{value}'")
+                else:
+                    # Use the format_value utility for other fields
+                    is_uuid = key.endswith('Id') and key != 'id'
+                    formatted_values.append(format_value(value, is_uuid=is_uuid))
+        
         formatted_rows.append(f"({','.join(formatted_values)})")
 
     # Construct the query
-    query = f'INSERT INTO clickhouse.student_transcript_staging ({",".join(table_keys)}) VALUES '
+    table_name = "student_transcript_staging"
+    query = f'INSERT INTO clickhouse.{table_name} ({",".join(table_keys)}) VALUES '
     query += ",".join(formatted_rows)
     
-    # Send the query using requests
+    # Execute the query using the utility function
     try:
-        response = requests.post(
-            url=clickhouse_url,
-            data=query,
-            headers={'Content-Type': 'text/plain'},
-            auth=(os.getenv("CLICKHOUSE_USER"), os.getenv("CLICKHOUSE_PASSWORD"))
-        )
-        
-        if response.status_code != 200:
-            error_msg = f"Failed to load data to ClickHouse: {response.text}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-        
-        logger.info(f"Successfully loaded {len(data)} records into student_transcript table")
+        success = execute_clickhouse_query(query, with_response=False)
+        if success:
+            logger.info(f"Successfully loaded {len(formatted_rows)} student transcript records to ClickHouse")
+            return f"Successfully loaded {len(formatted_rows)} rows to ClickHouse"
     except Exception as e:
         logger.error(f"Error loading data to ClickHouse: {str(e)}")
+        raise
+
+def optimize_clickhouse_table(**kwargs):
+    """Force merge the ClickHouse table to remove duplicates."""
+    # Check if data was loaded
+    load_result = kwargs['ti'].xcom_pull(task_ids='load_data_to_clickhouse')
+    if load_result == "No data to load":
+        logger.info("No data was loaded, skipping optimization")
+        return "No optimization needed"
+    
+    table_name = "student_transcript_staging"
+    
+    try:
+        success = optimize_table(table_name)
+        if success:
+            logger.info(f"Successfully optimized table {table_name}")
+            return f"Successfully optimized table {table_name}"
+    except Exception as e:
+        logger.error(f"Error optimizing ClickHouse table: {str(e)}")
         raise
 
 # Define the DAG
@@ -654,6 +775,22 @@ load_task = PythonOperator(
     dag=dag,
 )
 
+# Add optimize task
+optimize_task = PythonOperator(
+    task_id='optimize_clickhouse_table',
+    python_callable=optimize_clickhouse_table,
+    provide_context=True,
+    dag=dag,
+)
+
+# Add update timestamp task
+update_timestamp_task = PythonOperator(
+    task_id='update_etl_timestamp',
+    python_callable=student_transcript_update_etl_timestamp,
+    provide_context=True,
+    dag=dag,
+)
+
 # Set task dependencies
-extract_task_mongo >> extract_task_postgres >> transform_task >> load_task
+extract_task_mongo >> extract_task_postgres >> transform_task >> load_task >> optimize_task >> update_timestamp_task
 #  

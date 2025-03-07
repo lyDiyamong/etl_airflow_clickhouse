@@ -57,9 +57,10 @@ CREATE TABLE IF NOT EXISTS student_transcript_staging (
     -- Additional Info
     scorerId UUID,
     markedAt Nullable(DateTime),
+    updatedAt DateTime DEFAULT now(),
     
     -- Timestamps
     createdAt DateTime DEFAULT now()
 )
-ENGINE = MergeTree()
-ORDER BY (groupStructureId, structureRecordId, studentId);
+ENGINE = ReplacingMergeTree(updatedAt)
+ORDER BY (structureRecordId, studentId);

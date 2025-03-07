@@ -8,9 +8,15 @@ import requests
 import logging
 # from utilities import update_etl_timestamp
 from datetime import datetime
+import sys
 
 from dotenv import load_dotenv
+# sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+# from utilities.clickhouse_utils import execute_clickhouse_query, format_value, optimize_table
+# from utilities.update_etl_timestamp import update_etl_timestamp
 import os
+
+
 # Load environment variables from the .env file
 load_dotenv()
 logger = logging.getLogger(__name__)

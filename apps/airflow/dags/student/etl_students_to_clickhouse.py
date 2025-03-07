@@ -1,3 +1,4 @@
+import sys
 from airflow import DAG
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.http.hooks.http import HttpHook
@@ -10,10 +11,10 @@ import requests
 import json
 
 from dotenv import load_dotenv
+
 import os
 # Load environment variables from the .env file
 load_dotenv()
-
 # Define default arguments for the DAG
 default_args = {
     'owner': 'airflow',

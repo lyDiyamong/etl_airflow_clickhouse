@@ -15,7 +15,7 @@ import sys
 # Add the parent directory of 'dags' to the Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from utilities.clickhouse_utils import execute_clickhouse_query, format_value, optimize_table
-
+from utilities.update_etl_timestamp import update_etl_timestamp
 # Load environment variables from the .env file
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -26,12 +26,13 @@ default_args = {
     'retries': 1,
 }
 
-def update_etl_timestamp(**kwargs):
-    """Update the timestamp of the last successful ETL run."""
-    current_time = datetime.now().isoformat()
-    Variable.set("etl_teachers_last_run", current_time)
-    logger.info(f"Updated ETL timestamp to: {current_time}")
-    return current_time
+# def update_etl_timestamp(**kwargs):
+#     """Update the timestamp of the last successful ETL run."""
+#     current_time = datetime.now().isoformat()
+#     Variable.set("etl_teachers_last_run", current_time)
+#     logger.info(f"Updated ETL timestamp to: {current_time}")
+#     return current_time
+teacher_update_etl_timestamp = update_etl_timestamp("etl_teachers_last_run")
 
 def extract_teachers_from_postgres(**kwargs):
     """Extract data from PostgreSQL."""
@@ -150,7 +151,7 @@ load_task = PythonOperator(
 # Step 3: Update ETL Timestamp
 update_timestamp = PythonOperator(
     task_id='update_etl_timestamp',
-    python_callable=update_etl_timestamp
+    python_callable=teacher_update_etl_timestamp
 )
 
 # Step 4: Optimize ClickHouse table
