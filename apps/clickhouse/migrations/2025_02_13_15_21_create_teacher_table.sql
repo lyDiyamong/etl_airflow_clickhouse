@@ -1,5 +1,5 @@
 -- Migration: Create a new teacher table in the ClickHouse database
-CREATE TABLE IF NOT EXISTS clickhouse.teacher (
+CREATE TABLE IF NOT EXISTS clickhouse.teacher_testing (
     -- Primary Key
     teacherId INTEGER,
 
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS clickhouse.teacher (
     phone Nullable(String),
     position Nullable(String),
     createdAt DateTime,
-    updatedAt DateTime,
+    updatedAt DateTime DEFAULT now(),
     department Nullable(String),
     archiveStatus Int8 DEFAULT 0,
 
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS clickhouse.teacher (
     groupStructureId UUID,
     structureRecordId UUID,
     subjectId UUID,
-    employeeId UUID,
+    employeeId UUID
 
-) ENGINE = MergeTree()
+) ENGINE = ReplacingMergeTree(updatedAt)  -- Use updatedAt as version column for deduplication
 PARTITION BY schoolId      -- Partition by schoolId
 ORDER BY (schoolId, teacherId);   -- Primary key is schoolId and teacherId
